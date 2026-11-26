@@ -1,5 +1,5 @@
-const CACHE = "holy-mommy-app-ab633c892d951b07";
-const FILES = ["./","./.nojekyll","./app.js","./engine.js","./icon-192.png","./icon-512.png","./icon.svg","./index.html","./library.json","./manifest.webmanifest","./store.js","./style.css"];
+const CACHE = "holy-mommy-app-f218a590c6f169f2";
+const FILES = ["./","./app.js","./engine.js","./icon-192.png","./icon-512.png","./icon.svg","./index.html","./library.json","./manifest.webmanifest","./store.js","./style.css"];
 self.addEventListener("install", (event) =>
   event.waitUntil(
     caches
@@ -23,17 +23,25 @@ self.addEventListener("activate", (event) =>
 );
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (event.request.method !== "GET" || url.origin !== self.location.origin || !url.pathname.startsWith(new URL(self.registration.scope).pathname))
+  if (
+    event.request.method !== "GET" ||
+    url.origin !== self.location.origin ||
+    !url.pathname.startsWith(new URL(self.registration.scope).pathname)
+  )
     return;
   event.respondWith(
     (async () => {
-      const cached = await caches.open(CACHE).then(cache => cache.match(event.request));
+      const cached = await caches
+        .open(CACHE)
+        .then((cache) => cache.match(event.request));
       if (cached) return cached;
       try {
         return await fetch(event.request);
       } catch (error) {
         if (event.request.mode === "navigate")
-          return (await caches.open(CACHE)).match(new URL("./index.html", self.registration.scope));
+          return (await caches.open(CACHE)).match(
+            new URL("./index.html", self.registration.scope),
+          );
         throw error;
       }
     })(),
