@@ -1,3 +1,4 @@
+import { POLICY } from "./policy.js";
 import { RULES, TUNING } from "./rules.js";
 // Browser port of bot/prikorm/meal_service.py. No Telegram, network or storage calls.
 export const CONSENT_VERSION = "pwa-v2-2026-11-27.1";
@@ -182,8 +183,13 @@ export function introduction(lib, s, id, asOf = today(s.profile?.zone)) {
     max = Math.max(max, streak);
     last = d;
   }
-  if (declared || max >= 3)
-    return { status: "introduced", count: 3, last, declared };
+  if (declared || max >= POLICY.introduction.days)
+    return {
+      status: "introduced",
+      count: POLICY.introduction.days,
+      last,
+      declared,
+    };
   const refused = s.diary
     .filter(
       (r) =>
@@ -199,7 +205,7 @@ export function introduction(lib, s, id, asOf = today(s.profile?.zone)) {
     };
   const count =
     last && (last === asOf || addDays(last, 1) === asOf)
-      ? Math.min(streak, 2)
+      ? Math.min(streak, POLICY.introduction.days - 1)
       : 0;
   if (rows.length) return { status: "introducing", count, last };
   return {
@@ -231,7 +237,7 @@ export function known(lib, s, asOf = today(s.profile?.zone)) {
       a[0].localeCompare(b[0]),
     )) {
       run = ok ? (previous && addDays(previous, 1) === date ? run + 1 : 1) : 0;
-      if (run >= 3) set.add(id);
+      if (run >= POLICY.introduction.days) set.add(id);
       previous = date;
     }
   }
@@ -272,9 +278,9 @@ export function ready(p, day) {
     p?.consent &&
       p.active &&
       p.ready &&
-      age >= 4 &&
-      age <= 24 &&
-      (age >= 6 || p.early_doctor_confirmed),
+      age >= POLICY.readiness.minimum_months &&
+      age <= POLICY.readiness.maximum_months &&
+      (age >= POLICY.readiness.standard_months || p.early_doctor_confirmed),
   );
 }
 export function reason(lib, s, day) {
@@ -313,26 +319,17 @@ export function foodOK(
   if (b.has(key) || b.has("__unresolved__")) return false;
   const age = months(p.born, day),
     n = norm(f.name),
-    early = age < 6 && stage(f) === 4 && f.early_medical_allowed;
-  if (age < 6 && !early) return false;
+    early =
+      age < POLICY.readiness.standard_months &&
+      POLICY.early_priority.some((name) => norm(name) === n) &&
+      f.early_medical_allowed;
+  if (age < POLICY.readiness.standard_months && !early) return false;
   const dairy =
     ingredient &&
     n === "коровье молоко" &&
     age >= 6 &&
     f.safety?.includes("в составе блюд возможно раньше");
   if ((f.min_age == null || age < f.min_age) && !early && !dairy) return false;
-  const explicitStage = s.periods.some(
-    (period) =>
-      period.start <= day &&
-      addDays(period.start, 30) > day &&
-      (period.replacement_ids || []).includes(key),
-  );
-  if (
-    !dairy &&
-    stage(f) > age + (allowNextStage || explicitStage ? 1 : 0) &&
-    !known(lib, s, day).has(key)
-  )
-    return false;
   if (!ingredient && f.category === "Жиры") return false;
   if (
     ["соль", "сахар", "соль добавленная", "сахар добавленный"].includes(n) ||
@@ -341,8 +338,21 @@ export function foodOK(
     return false;
   // Risk is separate from family preferences. Never assign a universal new-food plan to medical risk.
   const declared = declaredKnown(lib, p).has(key);
+  const doctorAllergen =
+    !!p.allergen_doctor_confirmed &&
+    (p.doctor_allergen_foods || []).includes(key);
+  if (
+    POLICY.allergens.doctor_required_for.some((flag) => p[flag]) &&
+    allergenGroups(f).length &&
+    !known(lib, s, day).has(key) &&
+    !doctorAllergen &&
+    s.decisions[key] !== "returned"
+  )
+    return false;
+
   if (
     p.risk !== "no" &&
+    !doctorAllergen &&
     !declared &&
     !s.diary.some(
       (r) =>
@@ -396,7 +406,7 @@ export function recipeOK(lib, s, key, day, daily = false) {
 export function eligible(lib, s, item, day, daily = false) {
   return item.ingredients
     ? recipeOK(lib, s, item.id, day, daily)
-    : foodOK(lib, s, item.id, day);
+    : planFoodOK(lib, s, item.id, day);
 }
 export function feedingDays(s, day) {
   const start =
@@ -410,87 +420,214 @@ export function feedingDays(s, day) {
       )
     : 0;
 }
+export function feedingExperience(p, day) {
+  const start = p.feeding_started_on || p.feeding_start_date;
+  return p.started_in_app
+    ? Math.max(0, (p.actual_feeding_days || 1) - 1)
+    : start
+      ? Math.max(
+          0,
+          Math.floor((Date.parse(day) - Date.parse(start)) / 86400000),
+        )
+      : p.started
+        ? POLICY.meals.unknown_prior_experience_days
+        : 0;
+}
 export function slots(p, day) {
   const age = months(p.born, day),
-    start = p.feeding_started_on || p.feeding_start_date,
-    elapsed = p.started_in_app
-      ? Math.max(0, (p.actual_feeding_days || 1) - 1)
-      : start
-        ? Math.max(
-            0,
-            Math.floor((Date.parse(day) - Date.parse(start)) / 86400000),
-          )
-        : p.started
-          ? 30
-          : 0;
-  const ceiling = age < 6 ? 1 : age < 9 ? 3 : age < 12 ? 4 : 5;
-  const target =
-    age < 6
+    band = POLICY.meals.bands.find((b) => age >= b.min && age <= b.max);
+  if (!band) return [];
+  const requested =
+    p.meal_count == null
+      ? band.target
+      : Math.max(1, Math.min(Number(p.meal_count) || 1, band.ceiling));
+  const experience = feedingExperience(p, day),
+    ramp = POLICY.meals.ramp_days;
+  const progressive =
+    experience < ramp[0]
       ? 1
-      : age < 7
-        ? Math.min(3, 1 + Math.floor(elapsed / TUNING.six_month_step_days))
-        : age < 9
-          ? 3
-          : age < 12
-            ? 4
-            : 5;
-  const gradual =
-    elapsed < TUNING.ramp_days[0]
-      ? 1
-      : elapsed < TUNING.ramp_days[1]
+      : experience < ramp[1]
         ? 2
-        : elapsed < TUNING.ramp_days[2]
+        : experience < ramp[2]
           ? 3
-          : target;
-  const count = Math.min(ceiling, Number(p.meal_count) || target, gradual);
-  return {
-    1: ["Обед"],
-    2: ["Завтрак", "Обед"],
-    3: ["Завтрак", "Обед", "Ужин"],
-    4: ["Завтрак", "Обед", "Полдник", "Ужин"],
-    5: ["Завтрак", "Второй завтрак", "Обед", "Полдник", "Ужин"],
-  }[count];
+          : requested;
+  return POLICY.meals.slots[Math.min(requested, progressive, band.ceiling)];
 }
-const BASE = [
-  "кабачок",
-  "тыква",
-  "брокколи",
-  "цветная капуста",
-  "гречка",
-  "морковь",
-  "рис",
-];
+export function priorityFoodIds(lib, s, day) {
+  const age = months(s.profile.born, day),
+    k = known(lib, s, day),
+    result = [];
+  if (age < POLICY.readiness.standard_months)
+    return POLICY.early_priority
+      .map((n) => lib.foods.find((f) => norm(f.name) === norm(n))?.id)
+      .filter(Boolean);
+  for (const group of POLICY.priority_groups)
+    for (const item of group.items) {
+      const candidates = item.names
+        .map((n) => lib.foods.find((f) => norm(f.name) === norm(n)))
+        .filter(Boolean);
+      if (item.representative) {
+        if (candidates.some((f) => k.has(f.id))) continue;
+        const pick = candidates.find(
+          (f) => !k.has(f.id) && planFoodOK(lib, s, f.id, day, true),
+        );
+        if (pick) result.push(pick.id);
+      } else result.push(...candidates.map((f) => f.id));
+    }
+  return result;
+}
+export function planFoodOK(lib, s, key, day, ingredient = false) {
+  const f = lib.foods.find((f) => f.id === key);
+  return (
+    !!f &&
+    foodOK(lib, s, key, day, ingredient) &&
+    (known(lib, s, day).has(key) ||
+      stage(f) <=
+        months(s.profile.born, day) + POLICY.matrix_planning.prospective_months)
+  );
+}
 export function rankFoods(lib, s, foods, day) {
-  const k = known(lib, s, day);
-  const prior = s.periods.filter((p) => p.start < day).at(-1);
-  const carry = new Set(prior?.ids || []);
-  return [...foods].sort((a, b) => {
-    const score = (f) => {
-      const pos = BASE.indexOf(norm(f.name));
-      if (pos >= 0) return pos * 10;
-      if (months(s.profile.born, day) >= 6 && f.iron_rich)
-        return (norm(f.name) === "индейка" ? 45 : 95) + stage(f);
-      if (months(s.profile.born, day) >= 6 && allergenGroups(f).length)
-        return 65 + stage(f);
-      const category =
-        {
-          Овощи: 100,
-          "Крупы и злаки": 120,
-          "Мясо и птица": 130,
-          "Фрукты и ягоды": 150,
-          "Рыба и морепродукты": 160,
-          Молочные: 170,
-          Жиры: 180,
-        }[f.category] ?? 190;
-      return (
-        category +
-        stage(f) +
-        (carry.has(f.id) ? -20 : 0) +
-        (k.has(f.id) ? 1000 : 0)
-      );
-    };
-    return score(a) - score(b) || stage(a) - stage(b);
-  });
+  const priority = priorityFoodIds(lib, s, day),
+    prior = s.periods.filter((p) => p.start < day).at(-1),
+    carry = new Set(prior?.ids || []);
+  const fallback = (f) =>
+    priority.includes(f.id)
+      ? priority.indexOf(f.id)
+      : priority.length + stage(f) * 10 + (carry.has(f.id) ? -5 : 0);
+  return [...foods].sort((a, b) => fallback(a) - fallback(b));
+}
+export function verifiedAllergenProtocol(group) {
+  const entry = POLICY.allergens.verified_protocols?.[group];
+  return entry?.review_status === "approved" &&
+    validDate(entry.reviewed_at) &&
+    typeof entry.review_version === "string" &&
+    entry.review_version.trim() &&
+    /^https:\/\//.test(entry.source_url || "")
+    ? entry
+    : null;
+}
+export function reviewedRepeatPriority(lib, s, food, day) {
+  let priority = 0;
+  for (const group of allergenGroups(food)) {
+    const protocol = verifiedAllergenProtocol(group);
+    if (
+      !Number.isInteger(protocol?.return_after_days) ||
+      protocol.return_after_days < 1
+    )
+      continue;
+    const last = s.diary
+      .filter(
+        (r) =>
+          r.day < day &&
+          r.status === "eaten" &&
+          r.ingredients.some((id) =>
+            allergenGroups(
+              lib.foods.find((f) => f.id === id) || { id },
+            ).includes(group),
+          ),
+      )
+      .map((r) => r.day)
+      .sort()
+      .at(-1);
+    const gap = last
+      ? Math.floor((Date.parse(day) - Date.parse(last)) / 86400000)
+      : protocol.return_after_days;
+    priority = Math.max(
+      priority,
+      gap >= protocol.return_after_days
+        ? gap - protocol.return_after_days + 1
+        : 0,
+    );
+  }
+  return priority;
+}
+export function portionGuidance(lib, s, day, meal) {
+  const age = months(s.profile.born, day),
+    ids = meal.ingredients || [],
+    newIds = meal.newIDs || [],
+    allergen = newIds.some(
+      (id) =>
+        allergenGroups(lib.foods.find((f) => f.id === id) || { id }).length,
+    ),
+    experience = feedingExperience(s.profile, day);
+  const band = POLICY.portions.bands.find(
+    (b) => age >= b.min && age < b.max_exclusive,
+  );
+  let mealText =
+    age < POLICY.readiness.standard_months
+      ? POLICY.portions.early
+      : experience === 0 && !allergen
+        ? POLICY.portions.start
+        : experience < POLICY.meals.ramp_days[0]
+          ? POLICY.portions.first_steps
+          : band?.text || "Индивидуальный ориентир требует уточнения";
+  if (allergen && experience === 0)
+    mealText =
+      "Стартовый объём нового аллергена не задан. Общие объёмы приёма не являются дозировкой аллергена.";
+  const allergenIds = newIds.filter(
+    (id) => allergenGroups(lib.foods.find((f) => f.id === id) || { id }).length,
+  );
+  const newGroups = [
+    ...new Set(
+      allergenIds.flatMap((id) =>
+        allergenGroups(lib.foods.find((f) => f.id === id)),
+      ),
+    ),
+  ];
+  const protocol =
+    allergenIds.length === 1 && newGroups.length === 1
+      ? verifiedAllergenProtocol(newGroups[0])
+      : null;
+  const verifiedText = protocol?.initial_amount_text
+    ? `Указанный аллерген (${newGroups[0]}): ${protocol.initial_amount_text}. ${protocol.observation_text || "Время наблюдения отдельно не задано."} Источник: ${protocol.source_url}`
+    : null;
+  if (verifiedText && experience === 0)
+    mealText =
+      "Стартовое количество указано отдельно для конкретного аллергена. Объём приёма не является фактически съеденным количеством.";
+  const ordinaryFirst = newIds.some(
+    (id) =>
+      !allergenGroups(lib.foods.find((f) => f.id === id) || { id }).length &&
+      !s.diary.some(
+        (r) =>
+          r.day < day && r.status === "eaten" && r.ingredients.includes(id),
+      ),
+  );
+  return {
+    meal: mealText,
+    new_product:
+      age >= POLICY.readiness.standard_months && ordinaryFirst && !allergen
+        ? POLICY.portions.ordinary_new_start
+        : null,
+    allergen: allergen ? verifiedText || POLICY.allergens.initial_notice : null,
+    scope: POLICY.portions.scope,
+    status: POLICY.portions.status,
+    source: POLICY.portions.source,
+  };
+}
+export function textureSuggestion(p, day) {
+  if (!p.ready) return null;
+  const age = months(p.born, day),
+    target = POLICY.textures.find((t) => age >= t.min && age <= t.max),
+    scores = { puree: 0, soft_lumps: 1, soft_pieces: 2, family: 3 };
+  return target && (scores[p.food_skill] ?? 0) < scores[target.skill]
+    ? target
+    : null;
+}
+function uniqueCategories(lib, ids) {
+  return new Set(
+    ids
+      .map((id) => lib.foods.find((f) => f.id === id)?.category)
+      .filter(Boolean),
+  );
+}
+function componentSnapshot(lib, parts) {
+  const ids = [...new Set(parts.flatMap((f) => ingredients(lib, f.id)))];
+  return {
+    ...structuredClone(parts[0]),
+    name: parts.map((p) => p.name).join(" + "),
+    components: structuredClone(parts),
+    ingredient_ids: ids,
+  };
 }
 export function createPeriod(lib, s, start = today(s.profile?.zone)) {
   if (!ready(s.profile, start)) return null;
@@ -502,7 +639,7 @@ export function createPeriod(lib, s, start = today(s.profile?.zone)) {
     end = addDays(start, 29),
     foods = lib.foods.filter(
       (f) =>
-        foodOK(lib, s, f.id, end, true) &&
+        planFoodOK(lib, s, f.id, end, true) &&
         !(
           norm(f.name) === "коровье молоко" && months(s.profile.born, end) < 12
         ),
@@ -536,9 +673,24 @@ export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
       end = addDays(p.start, 29),
       k = known(lib, s, date),
       omitted = new Set(p.omitted || []);
+    const restricted = blocked(lib, s);
+    p.restricted_ids = [
+      ...new Set([
+        ...(p.restricted_ids || []),
+        ...p.ids.filter((id) => restricted.has(id)),
+      ]),
+    ];
     const ids = p.ids.filter(
-      (id) => !k.has(id) && foodOK(lib, s, id, end, true),
+      (id) => !k.has(id) && planFoodOK(lib, s, id, end, true),
     );
+    for (const id of p.restricted_ids)
+      if (
+        !ids.includes(id) &&
+        !k.has(id) &&
+        !omitted.has(id) &&
+        planFoodOK(lib, s, id, end, true)
+      )
+        ids.push(id);
     if (!p.accepted)
       for (const f of rankFoods(
         lib,
@@ -547,7 +699,7 @@ export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
           (f) =>
             !k.has(f.id) &&
             !omitted.has(f.id) &&
-            foodOK(lib, s, f.id, end, true),
+            planFoodOK(lib, s, f.id, end, true),
         ),
         date,
       ))
@@ -560,7 +712,10 @@ export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
         before: p.ids,
         after: ids,
       });
-      if (ids.some((id) => !p.ids.includes(id))) p.accepted = false;
+      if (
+        ids.some((id) => !p.ids.includes(id) && !p.restricted_ids.includes(id))
+      )
+        p.accepted = false;
       p.ids = ids;
       p.revision++;
     }
@@ -579,9 +734,16 @@ export function currentPeriod(lib, s, day = today(s.profile?.zone)) {
 }
 export function nextIntroduction(lib, s, p, day) {
   const k = known(lib, s, day),
-    pool = p.ids
-      .map((id) => lib.foods.find((f) => f.id === id))
-      .filter((f) => f && !k.has(f.id) && foodOK(lib, s, f.id, day, true));
+    pool = rankFoods(
+      lib,
+      s,
+      p.ids
+        .map((id) => lib.foods.find((f) => f.id === id))
+        .filter(
+          (f) => f && !k.has(f.id) && planFoodOK(lib, s, f.id, day, true),
+        ),
+      day,
+    );
   const active = pool
     .filter((f) => introduction(lib, s, f.id, day).status === "introducing")
     .sort(
@@ -593,8 +755,10 @@ export function nextIntroduction(lib, s, p, day) {
     const first = active[0];
     const result = [first];
     if (
-      s.profile.introduction_mode === "overlap" &&
-      introduction(lib, s, first.id, day).count === 2 &&
+      (s.profile.introduction_mode || POLICY.introduction.default_mode) ===
+        "overlap" &&
+      introduction(lib, s, first.id, day).count ===
+        POLICY.introduction.overlap_on_day - 1 &&
       !allergenGroups(first).length
     ) {
       const second = pool.find(
@@ -613,10 +777,8 @@ function snapshotItem(lib, item, extra = []) {
 export function getMenu(lib, s, day = today(s.profile?.zone)) {
   const p = currentPeriod(lib, s, day);
   if (!p || !p.accepted) return [];
-  const old = s.menus[day] || [],
-    completed = old.filter((m) => m.status !== "pending");
+  const completed = (s.menus[day] || []).filter((m) => m.status !== "pending");
   if (!ready(s.profile, day)) return completed;
-  // Recover completed slots after backup import using immutable diary evidence.
   for (const row of s.diary.filter(
     (r) => r.day === day && r.slot !== "-" && r.token === `${day}:${r.slot}`,
   ))
@@ -624,7 +786,7 @@ export function getMenu(lib, s, day = today(s.profile?.zone)) {
       completed.push({
         id: row.token,
         slot: row.slot,
-        key: "",
+        key: row.dish_id || "",
         name: row.name,
         snapshot: row.snapshot || { name: row.name, category: "Дневник" },
         ingredients: row.ingredients,
@@ -632,121 +794,284 @@ export function getMenu(lib, s, day = today(s.profile?.zone)) {
         status: row.status === "eaten" ? "done" : row.status,
       });
   const k = known(lib, s, day),
-    newFoods = nextIntroduction(lib, s, p, day),
-    newIds = newFoods.map((f) => f.id),
-    used = new Set(),
-    results = [];
-  const allowedKnown = lib.foods.filter(
+    before = known(lib, s, addDays(day, -1)),
+    experience = feedingExperience(s.profile, day),
+    daySlots = [...slots(s.profile, day)],
+    results = [],
+    used = new Set(completed.map((m) => m.key));
+  for (const old of completed)
+    if (!daySlots.includes(old.slot)) {
+      const free = daySlots.findIndex(
+        (slot) => !completed.some((m) => m.slot === slot),
+      );
+      if (free >= 0) daySlots[free] = old.slot;
+      else daySlots.push(old.slot);
+    }
+
+  const exposures = [
+    ...new Set(
+      s.diary
+        .filter((r) => r.day === day && r.status === "eaten")
+        .flatMap((r) => r.ingredients)
+        .filter((id) => !before.has(id)),
+    ),
+  ];
+  let newFoods = nextIntroduction(lib, s, p, day);
+  if (exposures.length) {
+    const exposedAllergen = exposures.some(
+      (id) =>
+        allergenGroups(lib.foods.find((f) => f.id === id) || { id }).length,
+    );
+    newFoods = newFoods.filter(
+      (f) =>
+        exposures.includes(f.id) ||
+        (!exposedAllergen &&
+          s.profile.introduction_mode === "overlap" &&
+          !allergenGroups(f).length &&
+          exposures.length < POLICY.introduction.overlap_on_day - 1),
+    );
+  }
+  const newIds = newFoods.map((f) => f.id);
+  const freshAllergen = newFoods.some((f) => allergenGroups(f).length);
+  const newSlot =
+    daySlots.includes("Обед") &&
+    newFoods.some((f) =>
+      POLICY.meals.new_food_lunch_categories.includes(f.category),
+    )
+      ? "Обед"
+      : daySlots.find((slot) => slot === POLICY.meals.new_food_default_slot) ||
+        daySlots[0];
+  const knownFoods = lib.foods.filter(
     (f) => k.has(f.id) && foodOK(lib, s, f.id, day),
   );
   const last = (id) =>
     s.diary
       .filter(
         (r) =>
-          r.day <= day && r.status === "eaten" && r.ingredients.includes(id),
+          r.day < day && r.status === "eaten" && r.ingredients.includes(id),
       )
       .map((r) => r.day)
       .sort()
       .at(-1) || "0000";
-  const recipes = lib.recipes.filter(
+  const lastDish = (id) =>
+    s.diary
+      .filter((r) => r.day < day && r.status === "eaten" && r.dish_id === id)
+      .map((r) => r.day)
+      .sort()
+      .at(-1) || "0000";
+  const recipePool = lib.recipes.filter(
     (r) =>
       r.category !== "Соусы" &&
       recipeOK(lib, s, r.id, day, true) &&
       ingredients(lib, r.id).every((id) => k.has(id) || newIds.includes(id)),
   );
-  const elapsed = feedingDays(s, day),
-    offset = Math.floor(Date.parse(day) / 86400000);
-  for (const slot of slots(s.profile, day)) {
+  const categoryLast = (c) => {
+    let date = "0000";
+    for (const row of s.diary)
+      if (
+        row.day < day &&
+        row.status === "eaten" &&
+        row.ingredients.some(
+          (id) => lib.foods.find((f) => f.id === id)?.category === c,
+        ) &&
+        row.day > date
+      )
+        date = row.day;
+    return date;
+  };
+  const weights = POLICY.diversity.weights;
+  const oldestRegular = [...POLICY.diversity.regular_groups].sort((a, b) =>
+    categoryLast(a).localeCompare(categoryLast(b)),
+  );
+  const usedCategories = () =>
+    uniqueCategories(
+      lib,
+      results.flatMap((m) => m.ingredients),
+    );
+  for (const slot of daySlots) {
     const done = completed.find((m) => m.slot === slot);
     if (done) {
       results.push(done);
       continue;
     }
     let item, ids, snapshot;
-    const priorDish = s.diary
-      .filter((r) => r.day < day && r.status === "eaten")
-      .at(-1)?.dish_id;
-    const matching = recipes
-      .filter((r) => r.meals.includes(slot.toLowerCase()) && !used.has(r.id))
-      .sort(
-        (a, b) =>
-          Number(a.id === priorDish) - Number(b.id === priorDish) ||
-          last(ingredients(lib, a.id)[0]).localeCompare(
-            last(ingredients(lib, b.id)[0]),
-          ),
-      );
-    if (matching.length) {
-      const min = matching.filter((r) => r.id !== priorDish);
-      item = (min.length ? min : matching)[
-        offset % (min.length || matching.length)
-      ];
-    }
-    if ((elapsed <= 30 || !s.profile.started) && newFoods.length) item = null; // Early introductions remain simple, not complex recipes.
-    if (slot === "Обед" && newFoods.length) {
-      const ordinary = newFoods.every((f) => !allergenGroups(f).length);
+    const preferences = POLICY.meals.category_preferences[slot] || [],
+      coverage = usedCategories();
+    const matching = recipePool.filter(
+      (r) =>
+        r.meals.includes(slot.toLowerCase()) &&
+        !used.has(r.id) &&
+        ingredients(lib, r.id).every((id) => k.has(id) || slot === newSlot),
+    );
+    const recipeScore = (r) => {
+      const cats = uniqueCategories(lib, ingredients(lib, r.id));
+      let score = 0;
+      for (let n = 0; n < preferences.length; n++)
+        if (cats.has(preferences[n]))
+          score += weights.slot_base - n * weights.slot_step;
+      for (const group of POLICY.diversity.daily_preferred_groups)
+        if (
+          (
+            POLICY.diversity.coverage_slots[
+              group.length === 1 ? group[0] : "animal_protein"
+            ] || [slot]
+          ).includes(slot) &&
+          !group.some((c) => coverage.has(c)) &&
+          group.some((c) => cats.has(c))
+        )
+          score += weights.daily_coverage;
+      const notCoveredRegular = oldestRegular.filter((c) => !coverage.has(c));
+      const oldest = notCoveredRegular[0];
+      if (oldest && cats.has(oldest)) score += weights.regular_category;
       if (
+        ingredients(lib, r.id).some(
+          (id) =>
+            k.has(id) &&
+            reviewedRepeatPriority(
+              lib,
+              s,
+              lib.foods.find((f) => f.id === id),
+              day,
+            ) > 0,
+        )
+      )
+        score += weights.regular_category;
+      if (
+        POLICY.diversity.avoid_consecutive_same_dish &&
+        lastDish(r.id) === addDays(day, -1)
+      )
+        score -= weights.same_dish_yesterday;
+      return score;
+    };
+    matching.sort(
+      (a, b) =>
+        recipeScore(b) - recipeScore(a) ||
+        ingredients(lib, a.id)
+          .map(last)
+          .sort()[0]
+          .localeCompare(ingredients(lib, b.id).map(last).sort()[0]) ||
+        lastDish(a.id).localeCompare(lastDish(b.id)),
+    );
+    if (matching.length) {
+      const best = recipeScore(matching[0]),
+        scoreBest = matching.filter(
+          (r) =>
+            recipeScore(r) === best &&
+            lastDish(r.id) === lastDish(matching[0].id),
+        );
+      item =
+        scoreBest[Math.floor(Date.parse(day) / 86400000) % scoreBest.length];
+    }
+    if (slot === newSlot && newFoods.length) {
+      if (
+        experience < POLICY.introduction.first_month_days ||
+        freshAllergen ||
         !item ||
-        !ordinary ||
         !ingredients(lib, item.id).some((id) => newIds.includes(id))
       ) {
         let parts = [...newFoods];
         if (parts.some((f) => f.category === "Жиры")) {
-          const carrier = allowedKnown.find((f) => !allergenGroups(f).length);
+          const carrier = knownFoods.find((f) => !allergenGroups(f).length);
           if (!carrier) continue;
           parts.unshift(carrier);
         }
-        if (elapsed > 30 && parts.length === 1 && allowedKnown.length) {
-          const carrier = allowedKnown.find((f) => f.id !== parts[0].id);
+        if (
+          experience >= POLICY.introduction.first_month_days &&
+          parts.length === 1
+        ) {
+          const carrier = knownFoods
+            .filter((f) => f.id !== parts[0].id)
+            .sort(
+              (a, b) =>
+                Number(coverage.has(a.category)) -
+                  Number(coverage.has(b.category)) ||
+                last(a.id).localeCompare(last(b.id)),
+            )[0];
           if (carrier) parts.push(carrier);
         }
         item = parts[0];
-        ids = parts.map((f) => f.id);
-        snapshot = snapshotItem(lib, item, ids);
-        snapshot.name = parts.map((f) => f.name).join(" + ");
-        snapshot.components = parts;
-        snapshot.ingredient_ids = ids;
+        snapshot = componentSnapshot(lib, parts);
+        ids = snapshot.ingredient_ids;
       }
     }
     if (!item) {
-      const priority = [...allowedKnown].sort(
-        (a, b) =>
-          last(a.id).localeCompare(last(b.id)) ||
-          Number(allergenGroups(b).length > 0) -
-            Number(allergenGroups(a).length > 0),
-      );
-      item = priority.find((f) => !used.has(f.id)) || priority[0];
+      const parts = [];
+      for (const group of POLICY.meals.simple_components[slot] || []) {
+        const choices = knownFoods
+          .filter(
+            (f) =>
+              group.includes(f.category) && !parts.some((p) => p.id === f.id),
+          )
+          .sort(
+            (a, b) =>
+              Number(used.has(a.id)) - Number(used.has(b.id)) ||
+              last(a.id).localeCompare(last(b.id)),
+          );
+        if (choices[0]) parts.push(choices[0]);
+      }
+      if (!parts.length) {
+        const choices = [...knownFoods].sort(
+          (a, b) =>
+            Number(used.has(a.id)) - Number(used.has(b.id)) ||
+            last(a.id).localeCompare(last(b.id)),
+        );
+        if (choices[0]) parts.push(choices[0]);
+      }
+      if (!parts.length) continue;
+      if (months(s.profile.born, day) < POLICY.readiness.standard_months)
+        parts.splice(1);
+      item = parts[0];
+      snapshot = componentSnapshot(lib, parts);
+      ids = snapshot.ingredient_ids;
     }
-    if (!item) continue;
-    used.add(item.id);
     ids ||= ingredients(lib, item.id);
     snapshot ||= snapshotItem(lib, item);
-    // Rotate a long-unused familiar allergen as a separate component, never a new exposure schedule.
+    // Repeat familiar allergens by recency, never with an invented medical frequency.
     if (
       slot === "Обед" &&
-      elapsed > 30 &&
-      !newFoods.some((f) => allergenGroups(f).length)
+      experience >= POLICY.introduction.first_month_days &&
+      !freshAllergen
     ) {
       const sides = lib.foods
         .filter(
           (f) =>
             k.has(f.id) &&
-            allergenGroups(f).length &&
+            (allergenGroups(f).length ||
+              POLICY.diversity.regular_groups.includes(f.category)) &&
             norm(f.name) !== "коровье молоко" &&
             foodOK(lib, s, f.id, day, true) &&
             !ids.includes(f.id),
         )
-        .sort((a, b) => last(a.id).localeCompare(last(b.id)));
-      if (sides.length && last(sides[0].id) < last(ids[0])) {
-        const side = sides[0];
-        snapshot = {
-          ...snapshot,
-          name: snapshot.name + " + " + side.name,
-          components: [snapshot, side],
-        };
-        ids = [...new Set([...ids, side.id])];
+        .sort(
+          (a, b) =>
+            reviewedRepeatPriority(lib, s, b, day) -
+              reviewedRepeatPriority(lib, s, a, day) ||
+            Number(
+              new Set([...usedCategories(), ...uniqueCategories(lib, ids)]).has(
+                a.category,
+              ),
+            ) -
+              Number(
+                new Set([
+                  ...usedCategories(),
+                  ...uniqueCategories(lib, ids),
+                ]).has(b.category),
+              ) ||
+            categoryLast(a.category).localeCompare(categoryLast(b.category)) ||
+            last(a.id).localeCompare(last(b.id)),
+        );
+      if (
+        sides[0] &&
+        (reviewedRepeatPriority(lib, s, sides[0], day) > 0 ||
+          categoryLast(sides[0].category) <
+            [...uniqueCategories(lib, ids)].map(categoryLast).sort().at(-1))
+      ) {
+        snapshot = componentSnapshot(lib, [snapshot, sides[0]]);
+        ids = [...new Set([...ids, sides[0].id])];
         snapshot.ingredient_ids = ids;
       }
     }
+    used.add(item.id);
     results.push({
       id: `${day}:${slot}`,
       slot,
@@ -756,6 +1081,7 @@ export function getMenu(lib, s, day = today(s.profile?.zone)) {
       ingredients: ids,
       newIDs: ids.filter((id) => !k.has(id)),
       status: "pending",
+      policy_version: POLICY.version,
     });
   }
   s.menus[day] = results;
@@ -940,9 +1266,20 @@ export function validateBackup(data, lib) {
       "ready",
       "early_doctor_confirmed",
       "notifications_requested",
+      "severe_eczema",
+      "known_food_allergy",
+      "allergen_doctor_confirmed",
     ])
       if (p[key] != null && typeof p[key] !== "boolean")
         throw Error("Некорректный флаг профиля");
+    if (
+      p.doctor_allergen_foods != null &&
+      (!Array.isArray(p.doctor_allergen_foods) ||
+        p.doctor_allergen_foods.some(
+          (id) => !lib.foods.some((f) => f.id === id),
+        ))
+    )
+      throw Error("Некорректные согласования аллергенов");
     if (p.doctor_plan_note != null && typeof p.doctor_plan_note !== "string")
       throw Error("Некорректная запись врача");
     for (const key of [
@@ -1156,9 +1493,12 @@ export function forecastMenus(
     const date = addDays(start, n),
       menu = getMenu(lib, copy, date);
     result.push({ day: date, meals: structuredClone(menu), provisional: true });
-    for (const meal of menu)
-      if (meal.status === "pending")
-        record(lib, copy, { day: date, mealID: meal.id }, date);
+    for (const meal of menu) {
+      if (meal.status !== "pending") continue;
+      if (!copy.menus[date]?.some((m) => m.id === meal.id))
+        copy.menus[date] = [...(copy.menus[date] || []), structuredClone(meal)];
+      record(lib, copy, { day: date, mealID: meal.id }, date);
+    }
   }
   return result;
 }
