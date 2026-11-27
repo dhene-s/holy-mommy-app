@@ -283,6 +283,29 @@ export function blocked(lib, s) {
   states.set(s, { stamp, ids: new Set(ids) });
   return ids;
 }
+export function earlyStartRequired(profile, day) {
+  const age = months(profile?.born, day);
+  return age >= POLICY.readiness.minimum_months && age < POLICY.readiness.standard_months;
+}
+export function confirmEarlyStart(lib, s, answer, date = today(s.profile?.zone)) {
+  if (typeof answer !== "boolean" || !s.profile?.consent || !earlyStartRequired(s.profile, date))
+    throw Error("Подтверждение доступно для профиля ребёнка 4–5 месяцев.");
+  s.profile.early_doctor_confirmed = answer;
+  if (s.ui.settingsDraft) s.ui.settingsDraft.early = answer ? "yes" : "no";
+  s.changes.push({ action: "early_start_answer", answer, at: new Date().toISOString() });
+  if (answer) {
+    // A formerly blocked/empty plan must be offered for agreement, not remain accepted and empty.
+    for (const p of s.periods)
+      if ((p.anchor_pending || addDays(p.start, 30) > date) && !p.ids.length) p.accepted = false;
+    refreshPeriods(lib, s, date);
+    const period = currentPeriod(lib, s, date);
+    if (period && !period.initial_ids?.length) period.initial_ids = [...period.ids];
+    return period;
+  }
+  for (const [day, menu] of Object.entries(s.menus))
+    if (day >= date) s.menus[day] = menu.filter((m) => m.status !== "pending");
+  return null;
+}
 export function ready(p, day) {
   const age = months(p?.born, day);
   return Boolean(
@@ -291,7 +314,7 @@ export function ready(p, day) {
       p.ready &&
       age >= POLICY.readiness.minimum_months &&
       age <= POLICY.readiness.maximum_months &&
-      (age >= POLICY.readiness.standard_months || p.early_doctor_confirmed),
+      (age >= POLICY.readiness.standard_months || p.early_doctor_confirmed === true),
   );
 }
 export function reason(lib, s, day) {
@@ -308,6 +331,10 @@ export function reason(lib, s, day) {
     return "В 4–5 месяцев нужно подтвердить согласование раннего начала с педиатром.";
   if (blocked(lib, s).has("__unresolved__"))
     return "Уточните названия исключений в профиле: автоматическое меню приостановлено.";
+  if (p.risk === "unknown" || p.risk == null)
+    return "В анкете не уточнены медицинские ограничения. Укажите ответ в настройках профиля; согласование раннего старта сохраняется отдельно.";
+  if (p.risk === "yes")
+    return "В профиле указаны медицинские ограничения. Универсальный план новых продуктов не формируется; согласование раннего старта их не отменяет.";
   return "С учётом ограничений безопасных вариантов пока нет. Нужна консультация педиатра; ограничения не отключаются.";
 }
 export function foodOK(
