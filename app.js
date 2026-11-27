@@ -106,6 +106,7 @@ async function start() {
       }),
     ]);
     s = await load(db);
+    E.upgradePlanning(lib, s, day());
     await save(db, s);
     idx = E.libraryIndex(lib);
     onboarding = s.draft?.type === "onboarding" ? s.draft.answers : null;
@@ -594,7 +595,7 @@ function renderCard(id) {
 async function renderToday(selected) {
   const d = E.validDate(selected) ? selected : day(),
     p = E.currentPeriod(lib, s, d),
-    menu = E.getMenu(lib, s, d);
+    menu = E.previewMenu(lib, s, d);
   await persist();
   const suggestion = E.textureSuggestion(s.profile, d);
   const elapsed = E.feedingDays(s, d),
@@ -624,7 +625,7 @@ function portionBlock(date, meal) {
 }
 function renderMeal(arg) {
   const [d, id] = decodeURIComponent(arg || "").split("|"),
-    meal = s.menus[d]?.find((m) => m.id === id);
+    meal = (d > day() ? E.previewMenu(lib, s, d) : s.menus[d] || []).find((m) => m.id === id);
   if (!meal) {
     go("today");
     return;
@@ -660,7 +661,7 @@ function grouped(ids) {
   return [...groups]
     .map(
       ([c, items]) =>
-        `<details open><summary>${esc(c)} · ${items.length}</summary><ul>${items.map((i) => `<li>${cap(i.name)} ${E.allergenGroups(i).length ? "⚠️ Аллерген" : ""} ${E.known(lib, s).has(i.id) ? "<small>уже введён</small>" : ""}</li>`).join("")}</ul></details>`,
+        `<details open><summary>${esc(c)} · ${items.length}</summary><ul>${items.map((i) => `<li data-food-id="${esc(i.id)}">${cap(i.name)} ${E.allergenGroups(i).length ? "⚠️ Аллерген" : ""} ${E.known(lib, s).has(i.id) ? "<small>уже введён</small>" : ""}</li>`).join("")}</ul></details>`,
     )
     .join("");
 }
@@ -675,7 +676,7 @@ async function renderPlan(selected) {
   app.innerHTML =
     title("План на 30 дней", "Ваш ближайший месяц") +
     (p
-      ? `<p>${p.anchor_pending ? "Первый месяц: календарь начнётся после первого кормления" : dateText(p.start) + " — " + dateText(E.addDays(p.start, 29))}</p><p>Согласуйте только новые продукты. Очередь — приоритет, а не обязательное число продуктов в неделю. Блюда подбираются автоматически; незавершённые знакомства переносятся.</p>${ids.length ? grouped(ids) : "<p>Новых продуктов нет. Продолжим меню из знакомых продуктов.</p>"}<div class="row">${button(p.accepted ? "✓ План принят" : "Согласовать план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить продукты", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>`
+      ? `<p>${p.anchor_pending ? "Первый месяц: календарь начнётся после первого кормления" : dateText(p.start) + " — " + dateText(E.addDays(p.start, 29))}</p><p>Список рассчитан по прогнозу фактических трёхдневных циклов на 30 дней. Пропуски и реакции изменят прогноз. Согласуйте только новые продукты. Очередь — приоритет, а не обязательное число продуктов в неделю. Блюда подбираются автоматически; незавершённые знакомства переносятся.</p>${!p.accepted && p.legacy_plans?.length ? "<p class=\"notice\">Старый список пересчитан по вместимости календаря. Дневник и завершённые кормления сохранены; согласуйте исправленный план.</p>" : ""}${ids.length ? grouped(ids) : "<p>Новых продуктов нет. Продолжим меню из знакомых продуктов.</p>"}<div class="row">${button(p.accepted ? "✓ План принят" : "Согласовать план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить продукты", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>`
       : `<p>${esc(E.reason(lib, s, date))}</p><a class="button" href="#preparation">Подготовка</a>`);
 }
 

@@ -1,6 +1,10 @@
 import { POLICY } from "./policy.js";
 import { RULES, TUNING } from "./rules.js";
 // Browser port of bot/prikorm/meal_service.py. No Telegram, network or storage calls.
+export const PLANNER_VERSION = "cycles-2026-11-27.2";
+// Disposable projections never migrate plans or recursively build more projections.
+const projections = new WeakSet();
+const previews = new WeakMap();
 export const CONSENT_VERSION = "pwa-v2-2026-11-27.1";
 export const NOTICE =
   "Тестовый материал. Не проверено педиатром. Не использовать как рекомендацию по кормлению";
@@ -245,7 +249,13 @@ export function known(lib, s, asOf = today(s.profile?.zone)) {
   for (const id of b) set.delete(id);
   return set;
 }
+const blockedCache = new WeakMap();
 export function blocked(lib, s) {
+  let states = blockedCache.get(lib);
+  if (!states) { states = new WeakMap(); blockedCache.set(lib, states); }
+  const stamp = JSON.stringify([s.profile?.excluded_names || [], s.decisions || {}]),
+    cached = states.get(s);
+  if (cached?.stamp === stamp) return new Set(cached.ids);
   const ids = new Set(),
     groups = new Set();
   for (const term of s.profile?.excluded_names || []) {
@@ -270,6 +280,7 @@ export function blocked(lib, s) {
   }
   for (const f of lib.foods)
     if (allergenGroups(f).some((g) => groups.has(g))) ids.add(f.id);
+  states.set(s, { stamp, ids: new Set(ids) });
   return ids;
 }
 export function ready(p, day) {
@@ -634,7 +645,10 @@ export function createPeriod(lib, s, start = today(s.profile?.zone)) {
   const existing = s.periods.find(
     (p) => p.start <= start && addDays(p.start, 30) > start,
   );
-  if (existing) return existing;
+  if (existing) {
+    ensurePeriod(lib, s, existing, start);
+    return existing;
+  }
   const k = known(lib, s, start),
     end = addDays(start, 29),
     foods = lib.foods.filter(
@@ -664,7 +678,64 @@ export function createPeriod(lib, s, start = today(s.profile?.zone)) {
     anchor_pending: !s.profile.started && !s.profile.feeding_started_on,
   };
   s.periods.push(period);
+  if (!projections.has(s)) {
+    projectPeriod(lib, s, period, start);
+    period.initial_ids = [...period.ids];
+  }
   return period;
+}
+// Select monthly goals from actual possible introduction events, not library size.
+function projectPeriod(lib, s, period, from) {
+  const start = period.anchor_pending ? from : (from > period.start ? from : period.start),
+    end = period.anchor_pending ? addDays(start, 29) : addDays(period.start, 29);
+  if (start > end) return;
+  const copy = structuredClone(s),
+    target = copy.periods.find((p) => p.start === period.start),
+    k = known(lib, copy, start),
+    omitted = new Set(period.omitted || []),
+    agreed = period.accepted ? new Set([...(period.ids || []), ...(period.restricted_ids || []), ...lib.foods.filter((f) => introduction(lib, s, f.id, start).status === "introducing").map((f) => f.id)]) : null,
+    candidates = rankFoods(lib, copy, lib.foods.filter((f) =>
+      (!agreed || agreed.has(f.id)) && !k.has(f.id) && !omitted.has(f.id) && planFoodOK(lib, copy, f.id, end, true) &&
+      !(norm(f.name) === "коровье молоко" && months(copy.profile.born, end) < 12)
+    ), start).map((f) => f.id);
+  target.ids = candidates;
+  target.accepted = true;
+  target.planning_version = PLANNER_VERSION;
+  projections.add(copy);
+  const days = Math.floor((Date.parse(end) - Date.parse(start)) / 86400000) + 1;
+  const forecast = candidates.length ? forecastMenus(lib, copy, start, days) : [],
+    ids = [...new Set(forecast.flatMap((r) => r.meals
+      .filter((m) => m.status === "pending")
+      .flatMap((m) => m.newIDs)).filter((id) => !k.has(id)))];
+  period.ids = ids;
+  period.deferred_ids = candidates.filter((id) => !ids.includes(id));
+  period.planning_version = PLANNER_VERSION;
+  period.projected_from = start;
+  period.initial_ids ||= [...ids];
+}
+function ensurePeriod(lib, s, period, from) {
+  if (projections.has(s) || period.planning_version === PLANNER_VERSION) return;
+  const before = structuredClone(period);
+  period.legacy_plans ||= [];
+  period.legacy_plans.push({ ids: before.ids, initial_ids: before.initial_ids,
+    accepted: before.accepted, revision: before.revision, planning_version: before.planning_version || "legacy" });
+  period.accepted = false;
+  projectPeriod(lib, s, period, from);
+  period.initial_ids = [...new Set([
+    ...(before.initial_ids || before.ids).filter((id) => known(lib, s, from).has(id)),
+    ...period.ids,
+  ])];
+  period.accepted = false;
+  period.revision = (period.revision || 0) + 1;
+  s.changes.push({ action: "migrate_cycle_plan", at: new Date().toISOString(),
+    start: period.start, before: before.ids, after: [...period.ids] });
+  for (const [date, menu] of Object.entries(s.menus))
+    if (date >= from) s.menus[date] = menu.filter((m) => m.status !== "pending");
+}
+export function upgradePlanning(lib, s, from = today(s.profile?.zone)) {
+  for (const p of s.periods)
+    if (p.anchor_pending || addDays(p.start, 30) > from) ensurePeriod(lib, s, p, from);
+  return s;
 }
 export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
   for (const p of s.periods) {
@@ -704,6 +775,14 @@ export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
         date,
       ))
         if (!ids.includes(f.id)) ids.push(f.id);
+    if (!projections.has(s)) {
+      const projected = { ...p, ids };
+      projectPeriod(lib, s, projected, date);
+      ids.splice(0, ids.length, ...projected.ids);
+      p.deferred_ids = projected.deferred_ids;
+      p.planning_version = projected.planning_version;
+      p.projected_from = projected.projected_from;
+    }
     if (JSON.stringify(ids) !== JSON.stringify(p.ids)) {
       s.changes.push({
         at: new Date().toISOString(),
@@ -713,7 +792,7 @@ export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
         after: ids,
       });
       if (
-        ids.some((id) => !p.ids.includes(id) && !p.restricted_ids.includes(id))
+        ids.some((id) => !p.ids.includes(id) && !p.restricted_ids.includes(id) && !s.diary.some((r) => r.day <= date && r.status === "eaten" && noReaction(r) && r.ingredients.includes(id)))
       )
         p.accepted = false;
       p.ids = ids;
@@ -727,7 +806,10 @@ export function refreshPeriods(lib, s, from = today(s.profile?.zone)) {
 export function currentPeriod(lib, s, day = today(s.profile?.zone)) {
   const pending = s.periods.find((p) => p.anchor_pending);
   if (pending) {
-    if (ready(s.profile, day)) return pending;
+    if (ready(s.profile, day)) {
+      ensurePeriod(lib, s, pending, day);
+      return pending;
+    }
     return null;
   }
   return createPeriod(lib, s, day);
@@ -1489,6 +1571,7 @@ export function forecastMenus(
 ) {
   const copy = structuredClone(s),
     result = [];
+  projections.add(copy);
   for (let n = 0; n < days; n++) {
     const date = addDays(start, n),
       menu = getMenu(lib, copy, date);
@@ -1501,4 +1584,19 @@ export function forecastMenus(
     }
   }
   return result;
+}
+
+// A future screen uses the same sequential forecast as monthly goals/shopping.
+// It never writes assumed feedings, dates or pending snapshots to the user state.
+export function previewMenu(lib, s, date, from = today(s.profile?.zone)) {
+  if (date <= from) return getMenu(lib, s, date);
+  const count = Math.floor((Date.parse(date) - Date.parse(from)) / 86400000) + 1;
+  if (count > 60) return [];
+  const signature = JSON.stringify([from, s.profile, s.diary, s.decisions, s.periods, s.menus]);
+  let cached = previews.get(s);
+  if (!cached || cached.signature !== signature || cached.rows.length < count) {
+    cached = { signature, rows: forecastMenus(lib, s, from, count <= 30 ? 30 : 60) };
+    previews.set(s, cached);
+  }
+  return structuredClone(cached.rows[count - 1]?.meals || []);
 }
