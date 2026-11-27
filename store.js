@@ -1,17 +1,29 @@
-import { emptyState } from "./engine.js";
+import { emptyState, migrate } from "./engine.js";
 export async function openStore() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("holy-mommy-pwa", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("state");
+    const request = indexedDB.open("holy-mommy-pwa", 2);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains("state"))
+        request.result.createObjectStore("state");
+    };
     request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+    request.onblocked = () =>
+      reject(
+        Error(
+          "Закройте остальные окна приложения и откройте его снова, чтобы завершить обновление данных.",
+        ),
+      );
+    request.onsuccess = () => {
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
   });
 }
 export async function load(db) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction("state");
     const req = tx.objectStore("state").get("local");
-    req.onsuccess = () => resolve(req.result || emptyState());
+    req.onsuccess = () => resolve(migrate(req.result || emptyState()));
     req.onerror = () => reject(req.error);
   });
 }

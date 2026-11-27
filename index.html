@@ -6,10 +6,11 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
+    <meta name="robots" content="noindex,nofollow" />
     <meta name="theme-color" content="#77608d" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
     <meta
       name="description"
@@ -25,7 +26,7 @@
   <body>
     <header>
       <a href="#today" class="brand">holy mommy <span>💜</span></a
-      ><span class="badge">Тестовая версия</span>
+      ><span class="badge">V2 · Тест</span>
     </header>
     <main id="app" tabindex="-1">
       <h1>Маленькие шаги к большой еде</h1>
@@ -38,6 +39,8 @@
       ><a href="#diary">📖<span>Дневник</span></a
       ><a href="#settings">⚙️<span>Настройки</span></a>
     </nav>
+    <script src="./pdf-lib.min.js"></script>
+    <script src="./fontkit.min.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

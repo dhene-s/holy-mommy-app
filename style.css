@@ -342,3 +342,59 @@ th {
     break-inside: avoid;
   }
 }
+/* V2: installed iPhone safe areas and narrow native controls. */
+body {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+header {
+  padding-top: 12px;
+  padding-bottom: 8px;
+}
+main {
+  min-height: 65vh;
+  padding-top: 10px;
+}
+input,
+select,
+textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+input[type="time"],
+input[type="date"] {
+  appearance: none;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  display: block;
+}
+button {
+  overflow-wrap: anywhere;
+}
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  margin: 16px 0;
+}
+progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.diary-photo {
+  max-width: 100%;
+  max-height: 280px;
+  border-radius: 12px;
+  object-fit: contain;
+}
+.hero {
+  padding: 12px 0;
+}
+nav {
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+h1 {
+  margin-top: 4px;
+}
+details > summary {
+  padding: 10px 0;
+}

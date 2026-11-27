@@ -1,3 +1,4 @@
+import { showPDF, localPhoto } from "./pdf.js";
 import * as E from "./engine.js";
 import { openStore, load, save, clear } from "./store.js";
 const $ = (s) => document.querySelector(s),
@@ -12,8 +13,20 @@ const esc = (s) =>
   );
 const button = (label, action, cls = "") =>
   `<button class="${cls}" data-action="${esc(action)}">${label}</button>`;
-const home = () => '<a class="button" href="#today">🏠 В меню</a>';
-const note = () => `<div class="notice">${E.NOTICE}</div>`;
+const home = () => "";
+const cap = (v) =>
+  esc(String(v || "-").replace(/^./u, (c) => c.toLocaleUpperCase("ru")));
+const statusText = (v) =>
+  ({
+    introduced: "Введён",
+    introducing: `Знакомство: день ${v.count} из 3`,
+    planned: "Запланирован",
+    review: "На проверке у врача",
+    excluded: "Исключён",
+    deferred: "Отложен",
+    not_introduced: "Не введён",
+  })[v.status] || "Неизвестный продукт";
+const note = () => "";
 const field = (label, name, value = "", type = "text", extra = "") =>
   `<label for="${name}">${label}</label><input id="${name}" name="${name}" type="${type}" value="${esc(value)}" ${extra}>`;
 const select = (label, name, options, value) =>
@@ -54,7 +67,7 @@ function cards(items) {
   return items
     .map(
       (i) =>
-        `<button class="item" data-action="card:${i.id}"><span>${esc(i.name)}<small>${esc(i.category)} · от ${i.min_age ?? "?"} мес.</small></span><span aria-hidden="true">›</span></button>`,
+        `<button class="item" data-action="card:${i.id}"><span>${cap(i.name)}<small>${esc(i.category)} · ${i.ingredients ? "от " + i.min_age + " мес. и условия ингредиентов" : E.stage(i) === 4 ? "базовый продукт; обычно около 6 мес." : "этап от " + E.stage(i) + " мес."}</small></span><span aria-hidden="true">›</span></button>`,
     )
     .join("");
 }
@@ -92,6 +105,7 @@ async function start() {
       }),
     ]);
     s = await load(db);
+    await save(db, s);
     idx = E.libraryIndex(lib);
     onboarding = s.draft?.type === "onboarding" ? s.draft.answers : null;
     step = s.draft?.step || 0;
@@ -193,101 +207,175 @@ function renderQuestion() {
     ready: false,
     started: false,
     introduced_names: [],
-    risk: "unknown",
     excluded_names: [],
-    notifications_requested: false,
+    risk: "unknown",
     zone: "Europe/Moscow",
     food_skill: "puree",
+    notifications_requested: false,
   };
   const a = onboarding;
-  if (!noticeSeen && !a.consent) {
+  if (!a.consent) {
     app.innerHTML =
-      title("Перед началом", "Давайте познакомимся") +
-      note() +
-      `<p>Мы не ставим диагнозы и не назначаем лечение. При экстренных симптомах обращайтесь за медицинской помощью.</p>${button("Ознакомился", "ack", "primary wide")}<a class="button" href="#library">Посмотреть библиотеку</a>`;
+      title("Перед началом", "Согласие на хранение данных") +
+      `<p>${E.NOTICE}</p><p>Анкета, дневник, реакции и выбранные фотографии хранятся только на устройстве. Передачи в облако нет. Данные можно удалить в настройках. При очистке браузера они могут потеряться.</p><form id="consent"><label><input type="checkbox" required>Разрешаю локальное хранение данных для плана и дневника</label><button class="primary">Продолжить</button></form>${button("Не согласен(на)", "decline")}<a class="button" href="#library">Библиотека без анкеты</a>`;
+    $("#consent").onsubmit = (e) => {
+      e.preventDefault();
+      run(async () => {
+        Object.assign(a, {
+          consent: true,
+          consent_version: E.CONSENT_VERSION,
+          consent_at: new Date().toISOString(),
+        });
+        step = 0;
+        s.draft = { type: "onboarding", answers: a, step };
+        await persist();
+        renderQuestion();
+      });
+    };
     return;
   }
   const qs = [
     [
+      "name",
       "Как зовут ребёнка?",
       field(
         "Имя (можно вымышленное)",
         "name",
         a.name,
         "text",
-        'required maxlength="100" autocomplete="off"',
+        'required maxlength="100"',
       ),
     ],
     [
+      "born",
       "Когда родился ребёнок?",
       field("Дата рождения", "born", a.born, "date", `required max="${day()}"`),
     ],
     [
+      "ready",
       "Готовность к прикорму",
       select(
         "Есть ли признаки готовности?",
         "ready",
         [
-          ["", "Выберите ответ"],
+          ["no", "Пока нет"],
           ["yes", "Да"],
-          ["no", "Нет"],
         ],
-        a.readiness_answer || "",
+        a.ready ? "yes" : "no",
       ) +
-        "<details><summary>Как оценить готовность?</summary><p>Ребёнок удерживает голову, может находиться вертикально сидя с необходимой поддержкой, координирует движения рук, глаз и рта и проглатывает пищу. Не нужно ждать самостоятельного сидения. Обсудите готовность с педиатром.</p></details>",
+        "<p>Удержание головы, вертикальное положение с необходимой поддержкой, координация рук, глаз и рта, проглатывание пищи. Самостоятельное сидение не обязательно. Обсудите готовность с педиатром.</p>",
     ],
-    [
-      "Уже начали прикорм?",
+  ];
+  if (E.months(a.born, day()) >= 4 && E.months(a.born, day()) < 6)
+    qs.push([
+      "early",
+      "Раннее начало",
       select(
-        "Прикорм начат?",
-        "started",
+        "Начало в 4–5 месяцев согласовано с педиатром?",
+        "early",
         [
           ["no", "Нет"],
           ["yes", "Да"],
         ],
-        a.started ? "yes" : "no",
+        a.early_doctor_confirmed ? "yes" : "no",
+      ) + "<p>Стандартный возраст начала — около 6 месяцев.</p>",
+    ]);
+  qs.push([
+    "started",
+    "Уже начали прикорм?",
+    select(
+      "Прикорм начат?",
+      "started",
+      [
+        ["no", "Нет"],
+        ["yes", "Да"],
+      ],
+      a.started ? "yes" : "no",
+    ),
+  ]);
+  if (a.started)
+    qs.push(
+      [
+        "feeding_start_date",
+        "Когда начали?",
+        field(
+          "Дата начала, если известна",
+          "feeding_start_date",
+          a.feeding_start_date || "",
+          "date",
+          `max="${day()}"`,
+        ),
+      ],
+      [
+        "introduced",
+        "Какие продукты уже ввели?",
+        field(
+          "Названия через запятую",
+          "introduced",
+          a.introduced_names.join(", "),
+          "text",
+          'maxlength="5000"',
+        ),
+      ],
+    );
+  qs.push(
+    [
+      "reactions",
+      "Известные реакции",
+      field(
+        "На какие продукты были реакции (необязательно)",
+        "reaction_foods",
+        a.reaction_foods || "",
+        "text",
+        'maxlength="5000"',
       ),
     ],
     [
-      "Какие продукты уже ввели?",
-      field(
-        "Названия через запятую",
-        "introduced",
-        a.introduced_names.join(","),
-        "text",
-        'maxlength="5000"',
-      ) +
-        '<p class="muted">Сохраним как сведения анкеты, без выдуманных дат и количества.</p>',
-    ],
-    [
-      "Есть медицинские ограничения?",
+      "risk",
+      "Медицинские ограничения",
       select(
         "Ограничения или рекомендации врача",
         "risk",
         [
-          ["unknown", "Не знаю — нужно уточнить с педиатром"],
+          ["unknown", "Нужно уточнить с педиатром"],
           ["no", "Нет"],
           ["yes", "Да"],
         ],
         a.risk,
-      ) +
-        '<p class="muted">При ответе «Да» новые продукты автоматически не назначаются. Доступны знакомые или возвращённые после консультации.</p>',
+      ),
     ],
     [
-      "Что нужно исключить?",
+      "excluded",
+      "Что семья не хочет вводить?",
       field(
         "Продукты или группы через запятую",
         "excluded",
-        a.excluded_names.join(","),
+        a.excluded_names.join(", "),
         "text",
-        'required maxlength="5000"',
-      ) +
-        '<p class="muted">Если название не распознано, автоматический план будет приостановлен.</p>',
+        'maxlength="5000"',
+      ),
     ],
     [
-      "Ежедневные напоминания",
+      "skill",
+      "Что ребёнок уже умеет?",
       select(
-        "Показывать напоминание при открытии приложения?",
+        "Освоенная текстура",
+        "food_skill",
+        [
+          ["puree", "Пюре"],
+          ["soft_lumps", "Мягкие комочки"],
+          ["soft_pieces", "Мягкие кусочки"],
+          ["family", "Адаптированная семейная еда"],
+        ],
+        a.food_skill,
+      ) +
+        `<label><input name="skills_confirmed" type="checkbox" ${a.skills_confirmed ? "checked" : ""}>Подтверждаю безопасное вертикальное положение и освоение выбранной текстуры</label>`,
+    ],
+    [
+      "notifications",
+      "Напоминания",
+      select(
+        "Показывать напоминания внутри приложения?",
         "notifications",
         [
           ["no", "Нет"],
@@ -295,95 +383,115 @@ function renderQuestion() {
         ],
         a.notifications_requested ? "yes" : "no",
       ) +
-        '<p class="notice">Закрытая PWA не отправляет сообщения по расписанию. Уведомления Telegram сюда не переносятся. Меню доступно в любое время.</p>',
+        "<p>Это сообщения в открытом приложении. Фоновая доставка пока не подключена.</p>",
     ],
-    [
-      "В какое время напомнить?",
-      field(
-        "Ориентир утреннего напоминания",
-        "time",
-        a.time || "09:00",
-        "time",
-        "required",
-      ) +
-        '<p class="muted">Напоминание появится внутри открытого приложения после этого времени.</p>',
-    ],
-    [
-      "Согласие на локальное хранение",
-      `<p>Анкета, дата рождения, продукты, дневник и сведения о реакциях будут храниться только в IndexedDB этого браузера на этом устройстве до удаления данных. Они не отправляются разработчику, в Telegram или на сервер.</p><p>Резервная копия содержит эти данные: сохраняйте её в надёжном месте. Очистка браузера или смена телефона могут удалить данные. Фотографии и Telegram ID не собираются.</p><p class="muted">Версия согласия: ${E.CONSENT_VERSION}. Согласие для Telegram ${lib.schema_version ? "не переносится автоматически" : ""}.</p><label><input type="checkbox" name="consent" required ${a.consent ? "checked" : ""}>Согласен(на) на локальное хранение перечисленных данных</label>${button("Не согласен(на)", "decline")}`,
-    ],
-    [
-      "Всё верно?",
-      summary(a) +
-        `<p class="muted">После сохранения можно указать пищевые навыки в настройках. По умолчанию — пюре; навыки не определяются только возрастом.</p>`,
-    ],
-  ];
-  const [head, body] = qs[step];
+  );
+  if (a.notifications_requested)
+    qs.push([
+      "time",
+      "Когда напомнить?",
+      field("Утром", "time", a.time || "09:00", "time", "required") +
+        field(
+          "Вечером",
+          "evening_time",
+          a.evening_time || "19:00",
+          "time",
+          "required",
+        ),
+    ]);
+  qs.push(["summary", "Всё верно?", summary(a)]);
+  step = Math.max(0, Math.min(step, qs.length - 1));
+  const [key, head, body] = qs[step];
   app.innerHTML =
-    title(`Анкета · ${step + 1} из 11`, head) +
-    `<div class="progress"><i style="width:${((step + 1) / 11) * 100}%"></i></div><form id="question">${body}<div class="actions">${step ? button("← Назад", "back") : home()}<button class="primary" type="submit">${step === 10 ? "Всё верно" : "Далее →"}</button></div></form>${step ? home() : ""}<p class="muted">До согласия ответы находятся только в памяти открытой страницы. После согласия черновик можно продолжить после перезапуска.</p>`;
+    title(`Анкета · ${step + 1} из ${qs.length}`, head) +
+    `<form id="question">${body}<div class="actions">${step ? button("← Назад", "back") : ""}<button class="primary">${key === "summary" ? "Всё верно" : "Далее →"}</button></div></form><p class="muted">Сохраняем автоматически. Можно продолжить после закрытия.</p>`;
+  function capture() {
+    const f = new FormData($("#question"));
+    if (key === "name") a.name = String(f.get("name")).trim();
+    if (key === "born") a.born = f.get("born");
+    if (key === "ready") {
+      a.ready = f.get("ready") === "yes";
+      a.readiness_answer = a.ready ? "yes" : "no";
+    }
+    if (key === "early") a.early_doctor_confirmed = f.get("early") === "yes";
+    if (key === "started") {
+      a.started = f.get("started") === "yes";
+      if (!a.started) {
+        a.introduced_names = [];
+        a.feeding_start_date = null;
+      }
+    }
+    if (key === "feeding_start_date")
+      a.feeding_start_date = f.get("feeding_start_date") || null;
+    if (key === "introduced") a.introduced_names = E.split(f.get("introduced"));
+    if (key === "reactions") a.reaction_foods = f.get("reaction_foods");
+    if (key === "risk") a.risk = f.get("risk");
+    if (key === "excluded") a.excluded_names = E.split(f.get("excluded"));
+    if (key === "skill") {
+      a.food_skill = f.get("food_skill");
+      a.skills_confirmed = f.has("skills_confirmed");
+    }
+    if (key === "notifications")
+      a.notifications_requested = f.get("notifications") === "yes";
+    if (key === "time") {
+      a.time = f.get("time");
+      a.evening_time = f.get("evening_time");
+    }
+    s.draft = { type: "onboarding", answers: a, step };
+  }
+  $("#question").oninput = () => {
+    capture();
+    persist().catch(errorMessage);
+  };
+  $("#question").onchange = $("#question").oninput;
   $("#question").onsubmit = (e) => {
     e.preventDefault();
     run(async () => {
-      const f = new FormData(e.target);
-      if (step === 0) a.name = String(f.get("name")).trim();
-      if (step === 1) {
-        a.born = f.get("born");
-        if (!E.validDate(a.born) || a.born > day())
-          throw Error("Проверьте дату рождения");
-      }
-      if (step === 2) {
-        a.readiness_answer = f.get("ready");
-        if (!a.readiness_answer) throw Error("Выберите ответ");
-        a.ready = a.readiness_answer === "yes";
-      }
-      if (step === 3) {
-        a.started = f.get("started") === "yes";
-        if (!a.started) a.introduced_names = [];
-      }
-      if (step === 4) a.introduced_names = E.split(f.get("introduced"));
-      if (step === 5) {
-        a.risk = f.get("risk");
-        if (a.risk === "unknown")
-          throw Error(
-            "Уточните ограничения у педиатра. До этого можно пользоваться библиотекой без персонального плана.",
-          );
-        if (a.risk === "no") a.excluded_names = [];
-      }
-      if (step === 6) a.excluded_names = E.split(f.get("excluded"));
-      if (step === 7) {
-        a.notifications_requested = f.get("notifications") === "yes";
-        if (!a.notifications_requested) delete a.time;
-      }
-      if (step === 8) a.time = f.get("time");
-      if (step === 9) {
-        a.consent = true;
-        a.consent_version = E.CONSENT_VERSION;
-        a.consent_at = new Date().toISOString();
-      }
-      if (step === 10) {
-        s.profile = { ...a, active: true };
+      capture();
+      if (key === "born" && (!E.validDate(a.born) || a.born > day()))
+        throw Error("Проверьте дату рождения");
+      if (key === "skill" && a.food_skill !== "puree" && !a.skills_confirmed)
+        throw Error("Для новой текстуры необходимо подтвердить навыки");
+      if (
+        key === "feeding_start_date" &&
+        a.feeding_start_date &&
+        (a.feeding_start_date < a.born || a.feeding_start_date > day())
+      )
+        throw Error("Проверьте дату начала");
+      if (key === "summary") {
+        s.profile = {
+          ...a,
+          active: true,
+          app_started_at: day(),
+          feeding_started_on: a.feeding_start_date || null,
+          start_date_known: Boolean(a.feeding_start_date),
+          introduction_mode: "conservative",
+        };
+        for (const term of E.split(a.reaction_foods)) {
+          const matches = E.resolve(lib, term);
+          if (matches.length === 1)
+            E.ingredients(lib, matches[0].id).forEach(
+              (id) => (s.decisions[id] = "pending"),
+            );
+          else s.profile.excluded_names.push(term);
+        }
         s.draft = null;
         onboarding = null;
         E.createPeriod(lib, s);
         await persist();
-        go("today");
+        go(E.months(s.profile.born, day()) < 4 ? "preparation" : "plan");
         return;
       }
       step++;
-      if (step === 4 && !a.started) step++;
-      if (step === 6 && a.risk === "no") step++;
-      if (step === 8 && !a.notifications_requested) step++;
-      if (a.consent) {
-        s.draft = { type: "onboarding", answers: a, step };
-        await persist();
-      }
+      s.draft.step = step;
+      await persist();
       renderQuestion();
     });
   };
 }
+
 function summary(a) {
-  return `<div class="card"><h2>${esc(a.name)}</h2><p>Дата рождения: ${dateText(a.born)}<br>Готовность: ${a.ready ? "Да" : "Нет"}<br>Прикорм начат: ${a.started ? "Да" : "Нет"}<br>Ввели: ${esc(a.introduced_names.join(", ") || "—")}<br>Ограничения: ${a.risk === "yes" ? "Да" : "Нет"}<br>Исключения: ${esc(a.excluded_names.join(", ") || "—")}<br>Напоминания в приложении: ${a.notifications_requested ? esc(a.time) : "Нет"}</p></div>`;
+  return `<div class="card"><h2>${esc(a.name)}</h2><p>Дата рождения: ${dateText(a.born)}<br>Готовность: ${a.ready ? "Да" : "Нет"}<br>Прикорм начат: ${a.started ? "Да" : "Нет"}<br>Дата начала: ${dateText(a.feeding_started_on || a.feeding_start_date)}<br>Ввели: ${esc(a.introduced_names.join(", ") || "—")}<br>Ограничения: ${a.risk === "yes" ? "Да" : a.risk === "no" ? "Нет" : "Нужно уточнить"}<br>Исключения: ${esc(a.excluded_names.join(", ") || "—")}<br>Напоминания в приложении: ${a.notifications_requested ? esc(a.time) : "Нет"}</p></div>`;
 }
 function renderLibrary() {
   let list = kind === "food" ? lib.foods : lib.recipes;
@@ -412,7 +520,35 @@ function renderLibrary() {
     renderLibrary();
   };
 }
+function specificSafety(item) {
+  const foods = item.ingredients
+    ? item.ingredients.map((i) => idx.get(i.food_id))
+    : [item];
+  const notes = new Set();
+  for (const f of foods) {
+    if (f.category === "Орехи и семена")
+      notes.add(
+        "Без цельных орехов и густых комков пасты. Подходящая форма требует отдельной проверки для продукта.",
+      );
+    if (f.category === "Рыба и морепродукты")
+      notes.add("Рыба без костей; рыба и морепродукты полностью приготовлены.");
+    if (f.category === "Яйца" || f.category === "Мясо и птица")
+      notes.add("Яйца и мясо должны быть полностью приготовлены.");
+    if (f.category === "Молочные")
+      notes.add(
+        "Только подходящие пастеризованные молочные продукты. Коровье молоко как напиток — не до года.",
+      );
+  }
+  return [...notes].map((t) => `<p class="notice warning">${t}</p>`).join("");
+}
 function details(item) {
+  if (item.components) return item.components.map(details).join("");
+  let displayForm = item.form;
+  if (active() && !item.ingredients && s.profile.food_skill === "puree") {
+    displayForm = item.form?.includes("пюре")
+      ? item.form.split(" или ")[0]
+      : "Отдельная инструкция для пюре в источнике не указана; требуется уточнение.";
+  }
   const ingredients = item.ingredients
     ?.map(
       (i) =>
@@ -420,11 +556,13 @@ function details(item) {
     )
     .join("\n");
   const allergies = item.ingredients
-    ? item.ingredients.map((i) => idx.get(i.food_id)?.allergen || "не указана")
-    : [item.allergen || "не указана"];
+    ? item.ingredients.map(
+        (i) => E.allergenGroups(idx.get(i.food_id)).join(", ") || "не указана",
+      )
+    : [E.allergenGroups(item).join(", ") || "не указана"];
   return (
     note() +
-    `<div class="card"><p class="eyebrow">${esc(item.category)} · ${esc(item.status)}</p><h2>${esc(item.name)}</h2><p>Возрастной ориентир: ${item.min_age ?? "не указан"} мес. Это не обязательная дата введения.</p>${ingredients ? `<h3>Ингредиенты для приготовления</h3><p style="white-space:pre-line">${esc(ingredients)}</p><p class="muted">Закладка для приготовления, не норма съедания.</p>` : ""}<h3>Приготовление и подача</h3><p>${esc(item.how || item.form || "Не указаны в источнике")}</p>${item.how ? `<p>${esc(item.form)}</p>` : ""}<h3>Условия и безопасность</h3><p>${esc(item.condition || "Условия определяются ингредиентами и навыками.")}</p><p>${esc(item.safety || "См. ограничения ингредиентов. Дополнительные сведения не указаны.")}</p><p>Аллергенность: ${esc([...new Set(allergies)].join(", "))}. Неизвестная маркировка не означает отсутствие аллергена.</p>${item.ingredients ? `<p>Хранение: ${esc(item.storage || "не указано")}. Повторный разогрев: ${esc(item.reheat || "не указано")}.</p>` : ""}<p class="muted">Источники: ${esc(item.sources || "не указаны")}</p>${
+    `<div class="card"><p class="eyebrow">${esc(item.category)} · Черновой материал</p><h2>${cap(item.name)}</h2><p>Возрастной ориентир: ${item.min_age ?? "не указан"} мес. Это не обязательная дата введения.</p>${ingredients ? `<h3>Ингредиенты для приготовления</h3><p style="white-space:pre-line">${esc(ingredients)}</p><p class="muted">Закладка для приготовления, не норма съедания.</p>` : ""}<h3>Приготовление и подача</h3><p>${esc(item.how || displayForm || "Не указаны в источнике")}</p>${item.how ? `<p>${esc(item.form)}</p>` : ""}<h3>Условия и безопасность</h3>${specificSafety(item)}<p>${esc(item.condition || "Условия определяются ингредиентами и навыками.")}</p><p>${esc(item.safety || "См. ограничения ингредиентов. Дополнительные сведения не указаны.")}</p><p>Аллергенность: ${esc([...new Set(allergies)].join(", "))}. Неизвестная маркировка не означает отсутствие аллергена.</p>${item.ingredients ? `<p>Хранение: ${esc(item.storage || "не указано")}. Повторный разогрев: ${esc(item.reheat || "не указано")}.</p>` : ""}<p class="muted">Источники: ${esc(item.sources || "не указаны")}</p>${
       item.ingredients
         ? `<details><summary>Ограничения ингредиентов</summary>${item.ingredients
             .map((i) => {
@@ -443,7 +581,7 @@ function renderCard(id) {
     return;
   }
   app.innerHTML =
-    title("Карточка", esc(item.name)) +
+    title("Карточка", cap(item.name)) +
     details(item) +
     (active()
       ? `<div class="notice ${E.eligible(lib, s, item, day()) ? "" : "warning"}">${E.eligible(lib, s, item, day()) ? "Подходит по текущим техническим ограничениям. Медицинского одобрения нет." : "Не предлагается автоматически с текущим возрастом, навыками или ограничениями."}</div>${button("➕ Добавить в дневник", `add:${id}`, "primary")}${!item.ingredients ? button("✅ Уже пробовали", `known:${id}`) : ""}`
@@ -452,31 +590,34 @@ function renderCard(id) {
     home();
 }
 async function renderToday(selected) {
-  const d = E.validDate(selected) ? selected : day();
-  const menu = E.getMenu(lib, s, d);
+  const d = E.validDate(selected) ? selected : day(),
+    p = E.currentPeriod(lib, s, d),
+    menu = E.getMenu(lib, s, d);
   await persist();
-  const p = E.createPeriod(lib, s, d);
-  const time = new Intl.DateTimeFormat("en-GB", {
-    timeZone: s.profile.zone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date());
-  const reminder =
-    s.profile.notifications_requested &&
-    d === day() &&
-    time >= (s.profile.time || "09:00") &&
-    menu.some((m) => m.status === "pending");
+  const elapsed = E.feedingDays(s, d),
+    nearing = p && !p.anchor_pending && E.addDays(p.start, 23) <= d;
   app.innerHTML =
     title(
-      d === day() ? "Сегодня · " + dateText(d) : "Просмотр · " + dateText(d),
-      `Что сегодня на столе?`,
+      `${dateText(d)} · ${elapsed ? (s.profile.start_date_known ? "День прикорма " : "День дневника ") + elapsed : s.profile.started || s.profile.start_date_uncertain_legacy ? "Дата начала неизвестна" : "Первый день ещё не начат"}`,
+      "Что сегодня на столе?",
     ) +
-    `<p class="muted">${esc(s.profile.name)} · ${E.months(s.profile.born, d)} мес.</p>${reminder ? '<div class="notice">💜 Не забудьте отметить приёмы пищи, чтобы сохранить информацию в дневнике прикорма.</div>' : ""}${!p?.accepted ? '<p class="notice">Предварительный план. Просмотрите и примите его в разделе «План».</p>' : ""}${note()}${menu.length ? menu.map((m) => `<button class="card item" data-action="meal:${d}|${m.id}"><span><small>${esc(m.slot)} · ${{ done: "Сохранено", skipped: "Пропущено", pending: "Не отмечено" }[m.status]}</small>${esc(m.name)} ${m.newIDs.length ? "🆕" : ""}</span><span>›</span></button>`).join("") : `<div class="card"><h2>План пока не доступен</h2><p>${esc(E.reason(lib, s, d))}</p><a class="button" href="#settings">Проверить настройки</a></div>`}<p class="muted">Вода с едой; грудное молоко/смесь продолжаются по возрасту и рекомендациям. Не заставляйте доедать.</p><div class="row">${button("← День раньше", `day:${E.addDays(d, -1)}`)}${button("День вперёд →", `day:${E.addDays(d, 1)}`)}</div><a class="button wide" href="#library">📚 Продукты и рецепты</a><a class="button" href="#preparation">Подготовка к прикорму</a>${d !== day() ? '<a class="button" href="#today">Вернуться к сегодняшнему дню</a>' : ""}`;
+    `<p>${esc(s.profile.name)} · ${E.months(s.profile.born, d)} мес.</p>${nearing ? `<div class="notice">Пора согласовать следующий месяц. ${button("Посмотреть план", `nextperiod:${E.addDays(p.start, 30)}`)}</div>` : ""}${p?.anchor_pending ? "<p>Первое меню остаётся до фактического кормления. Согласование плана не запускает календарь.</p>" : ""}${p && !p.accepted ? '<a class="button primary" href="#plan">Согласовать предварительный план</a>' : ""}${menu.length ? menu.map((m) => `<button class="card item" data-action="meal:${d}|${m.id}"><span><small>${esc(m.slot)} · ${{ done: "Сохранено", skipped: "Не пробовали", refused: "Отказался", pending: "Не отмечено" }[m.status]}</small>${cap(m.name)} ${m.newIDs.length ? "🆕" : ""}<small>${m.newIDs.map((id) => `${cap(idx.get(id).name)}: ${statusText(E.introduction(lib, s, id, d))}`).join(" · ")}${m.ingredients.some((id) => E.allergenGroups(idx.get(id)).length) ? " · ⚠️ Аллерген" : ""}</small></span><span>›</span></button>`).join("") : !p ? `<div class="card"><h2>План пока не доступен</h2><p>${esc(E.reason(lib, s, d))}</p><a class="button" href="#preparation">Подготовка</a></div>` : p?.accepted ? `<p class="notice">${esc(E.reason(lib, s, d))}</p>` : ""}<p class="muted">${E.months(s.profile.born, d) >= 6 ? "Предлагайте воду с едой без обязательного объёма." : "Вопрос воды при раннем старте согласуйте с врачом."} Продолжайте ГВ/смесь по потребностям. Не заставляйте доедать.</p>${E.reminders(
+      s,
+      menu,
+      d,
+    )
+      .map(
+        (r) =>
+          `<div class="notice"><small>Напоминание внутри приложения</small><p>${r.text}</p><a class="button" href="#${r.route}">Открыть</a></div>`,
+      )
+      .join(
+        "",
+      )}<div class="row">${button("← День раньше", `day:${E.addDays(d, -1)}`)}${button("День вперёд →", `day:${E.addDays(d, 1)}`)}</div>`;
 }
+
 function renderMeal(arg) {
-  const [d, id] = decodeURIComponent(arg || "").split("|");
-  const meal = s.menus[d]?.find((m) => m.id === id);
+  const [d, id] = decodeURIComponent(arg || "").split("|"),
+    meal = s.menus[d]?.find((m) => m.id === id);
   if (!meal) {
     go("today");
     return;
@@ -484,10 +625,22 @@ function renderMeal(arg) {
   s.ui.lastMeal = { day: d, id };
   persist().catch(errorMessage);
   app.innerHTML =
-    title(`${dateText(d)} · ${esc(meal.slot)}`, esc(meal.name)) +
-    details(meal.snapshot) +
-    `${meal.status === "pending" && d <= day() ? button("✅ Ввели", `ate:${d}|${id}`, "primary") + button("⏭ Пропустили", `skip:${d}|${id}`) + button("➕ Ввели другое", `other:${d}|${id}`) : `<p class="notice">${d > day() ? "Будущий день: только просмотр. Дата и дневник не изменяются." : "Этот приём уже отмечен."}</p>`}<a class="button" href="#today/${d}">← К меню дня</a>${home()}`;
+    title(`${dateText(d)} · ${esc(meal.slot)}`, cap(meal.name)) +
+    (meal.snapshot.components
+      ? meal.snapshot.components.map(details).join("")
+      : details(meal.snapshot)) +
+    `<p>Ориентир порции: ${esc(meal.snapshot.portion || "в источнике не указан; учитывайте аппетит ребёнка")}. Количество для приготовления не равно съеденному.</p>` +
+    (meal.status === "pending" && d <= day()
+      ? button("✅ Поели", `ate:${d}|${id}`, "primary") +
+        button("⏭ Не пробовали", `skip:${d}|${id}`) +
+        button("Отказался", `refuse:${d}|${id}`) +
+        button("⚠️ Есть реакция", `reaction:${d}|${id}`) +
+        button("Заменить блюдо", `dish:${d}|${id}`) +
+        button("Дали другой продукт", `other:${d}|${id}`)
+      : `<p>${d > day() ? "Будущий день: только просмотр. Дата и дневник не изменяются." : "Этот приём уже отмечен."}</p>`) +
+    `<a class="button" href="#today/${d}">← К меню дня</a>`;
 }
+
 function grouped(ids) {
   const groups = new Map();
   for (const id of ids) {
@@ -500,22 +653,25 @@ function grouped(ids) {
   return [...groups]
     .map(
       ([c, items]) =>
-        `<details open><summary>${esc(c)} · ${items.length}</summary><ul>${items.map((i) => `<li>${esc(i.name)} ${E.known(lib, s).has(i.id) ? "<small>уже введён</small>" : ""}</li>`).join("")}</ul></details>`,
+        `<details open><summary>${esc(c)} · ${items.length}</summary><ul>${items.map((i) => `<li>${cap(i.name)} ${E.known(lib, s).has(i.id) ? "<small>уже введён</small>" : ""}</li>`).join("")}</ul></details>`,
     )
     .join("");
 }
 async function renderPlan(selected) {
-  const start = E.validDate(selected) ? selected : day(),
-    p = E.createPeriod(lib, s, start);
+  const date = E.validDate(selected) ? selected : day(),
+    p = E.validDate(selected)
+      ? E.createPeriod(lib, s, date)
+      : E.currentPeriod(lib, s, date);
   await persist();
+  const k = E.known(lib, s, date),
+    ids = (p?.ids || []).filter((id) => !k.has(id));
   app.innerHTML =
-    title("Гибкий план", "Ваш ближайший месяц") +
-    note() +
+    title("План на 30 дней", "Ваш ближайший месяц") +
     (p
-      ? `<p>${dateText(p.start)} — ${dateText(E.addDays(p.start, 29))}</p><p class="muted">Цели и доступные блюда, а не обязательная программа. Ежедневно выбираются позиции с учётом фактического дневника и навыков.</p><div class="row">${button(p.accepted ? "✓ План принят" : "Принять план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить позиции", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>${grouped(p.ids)}${button("Следующий месяц", `nextperiod:${E.addDays(p.start, 30)}`)}`
-      : `<div class="card"><p>${esc(E.reason(lib, s, start))}</p></div>`) +
-    `<a class="button wide" href="#library">📚 Полная библиотека</a>${home()}`;
+      ? `<p>${p.anchor_pending ? "Первый месяц: календарь начнётся после первого кормления" : dateText(p.start) + " — " + dateText(E.addDays(p.start, 29))}</p><p>Согласуйте только новые продукты. Блюда подбираются автоматически. Незавершённые знакомства переносятся.</p>${ids.length ? grouped(ids) : "<p>Новых продуктов нет. Продолжим меню из знакомых продуктов.</p>"}<div class="row">${button(p.accepted ? "✓ План принят" : "Согласовать план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить продукты", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>`
+      : `<p>${esc(E.reason(lib, s, date))}</p><a class="button" href="#preparation">Подготовка</a>`);
 }
+
 function renderEntry() {
   const d = s.draft?.type === "entry" ? s.draft : null;
   if (d?.mealID && !s.menus[d.day]) E.getMenu(lib, s, d.day);
@@ -525,7 +681,7 @@ function renderEntry() {
   }
   app.innerHTML =
     title("Дневник", "Что получилось попробовать?") +
-    `<div class="emergency" id="urgent" hidden><strong>Немедленно вызовите скорую помощь по местному номеру (в России — 112).</strong><p>Не ждите сохранения записи или ответа приложения. При нарушении дыхания, отёке языка/горла, удушье нужна срочная помощь.</p></div><form id="entry">${field("Дата", "date", d.day, "date", `required max="${day()}" ${d.mealID || (d.slot && d.slot !== "-") ? "readonly" : ""}`)}${field("Фактически съели (через запятую)", "name", d.name, "text", `required maxlength="5000" ${d.planned ? "readonly" : ""}`)}${field("Форма подачи (неизвестно — дефис)", "form", d.form || "-", "text", 'maxlength="1000"')}${field("Фактическое количество (неизвестно — дефис)", "quantity", d.quantity || "-", "text", 'maxlength="1000"')}${select(
+    `<div class="emergency" id="urgent" hidden><strong>Немедленно вызовите скорую помощь по местному номеру (в России — 112).</strong><p>Не ждите сохранения записи или ответа приложения. При нарушении дыхания, отёке языка/горла, удушье нужна срочная помощь.</p></div><form id="entry">${d.consumption_unknown ? '<label><input name="confirm_ate" type="checkbox" required>Подтверждаю, что ребёнок действительно съел продукт</label>' : ""}${field("Дата", "date", d.day, "date", `required max="${day()}" ${d.mealID || (d.slot && d.slot !== "-") ? "readonly" : ""}`)}${field("Фактически съели (через запятую)", "name", d.name, "text", `required maxlength="5000" ${d.planned ? "readonly" : ""}`)}${field("Форма подачи (неизвестно — дефис)", "form", d.form || "-", "text", 'maxlength="1000"')}${field("Фактическое количество (неизвестно — дефис)", "quantity", d.quantity || "-", "text", 'maxlength="1000"')}${select(
       "Реакция",
       "reaction",
       [
@@ -536,7 +692,7 @@ function renderEntry() {
         ["Другое", "Другое"],
       ],
       d.reaction || "Нет реакции",
-    )}<label for="symptoms">Симптомы или комментарий (сохраним исходный текст)</label><textarea id="symptoms" name="symptoms" maxlength="5000">${esc(d.symptoms || "")}</textarea><p class="muted">Неизвестные названия сохраняются без рекомендаций. При реакции возможные ингредиенты отправляются на проверку педиатру; приложение не определяет причину.</p><button class="primary" type="submit">Сохранить запись</button><a class="button" href="#reactions">⚠️ Экстренная памятка</a></form>${home()}`;
+    )}<label for="symptoms">Симптомы или комментарий (сохраним исходный текст)</label><textarea id="symptoms" name="symptoms" maxlength="5000">${esc(d.symptoms || "")}</textarea><p class="muted">Неизвестные названия сохраняются без рекомендаций. При реакции возможные ингредиенты отправляются на проверку педиатру; приложение не определяет причину.</p>${d.planned ? `<fieldset><legend>Какие компоненты ребёнок действительно съел?</legend>${d.ids.map((id) => `<label><input type="checkbox" name="consumed" value="${id}" ${!d.consumed_ids || d.consumed_ids.includes(id) ? "checked" : ""}>${cap(idx.get(id).name)}</label>`).join("")}</fieldset>` : ""}<label for="suspected">При реакции подозреваемый ингредиент</label><select id="suspected" name="suspected"><option value="">Не знаю — учесть все ингредиенты</option>${(d.ids || []).map((id) => `<option value="${id}" ${d.suspected === id ? "selected" : ""}>${cap(idx.get(id).name)}</option>`).join("")}</select><label for="photo">Фото по желанию — только на устройстве</label><input id="photo" type="file" accept="image/jpeg,image/png,image/webp"><label><input type="checkbox" id="photo-consent">Разрешаю сохранить выбранное фото в дневнике</label>${d.photo ? "<p>Фото сохранено в черновике</p>" : ""}<button class="primary" type="submit">Сохранить запись</button><a class="button" href="#reactions">⚠️ Экстренная памятка</a></form>${home()}`;
   const form = $("#entry");
   form.oninput = () => {
     const f = new FormData(form);
@@ -547,11 +703,23 @@ function renderEntry() {
       quantity: f.get("quantity"),
       reaction: f.get("reaction"),
       symptoms: f.get("symptoms"),
+      consumed_ids: f.getAll("consumed"),
+      suspected: f.get("suspected"),
     });
     $("#urgent").hidden = !E.emergency(d.symptoms);
     persist().catch(errorMessage);
   };
   form.onchange = form.oninput;
+  $("#photo").onchange = (e) =>
+    run(async () => {
+      if (!$("#photo-consent").checked) {
+        e.target.value = "";
+        throw Error("Сначала разрешите локальное хранение выбранного фото");
+      }
+      d.photo = await localPhoto(e.target.files[0]);
+      await persist();
+      announce("Фото сохранено только на устройстве");
+    });
   form.onsubmit = (e) => {
     e.preventDefault();
     run(async () => {
@@ -564,7 +732,11 @@ function renderEntry() {
         )
           return;
       }
-      const names = E.split(d.name),
+      if (d.planned && d.consumed_ids?.length === 0)
+        throw Error(
+          "Если ребёнок не ел, отметьте «Не пробовали» или «Отказался» в меню дня",
+        );
+      const names = d.planned ? [d.name] : E.split(d.name),
         matches = names.map((n) => E.resolve(lib, n)),
         ids = [
           ...new Set(
@@ -574,6 +746,7 @@ function renderEntry() {
           ),
         ];
       if (
+        !d.planned &&
         matches.some((r) => r.length !== 1) &&
         !confirm(
           "Есть неизвестные или неоднозначные названия. Сохранить как непроверенную запись без рекомендаций?",
@@ -599,8 +772,11 @@ function renderEntry() {
           form: d.form || "-",
           quantity: d.quantity || "-",
           reaction,
+          status: "eaten",
+          consumption_unknown: false,
           comment,
-          ingredients: ids,
+          ingredients: d.planned ? d.consumed_ids || d.ids : ids,
+          photo: d.photo || null,
         });
         if (reaction !== "Нет реакции" && reaction !== "-")
           ids.forEach((id) => (s.decisions[id] = "pending"));
@@ -620,9 +796,12 @@ function renderEntry() {
           quantity: d.quantity,
           reaction,
           comment,
-          ids: d.planned ? d.ids : ids,
+          ids: d.planned ? d.consumed_ids || d.ids : ids,
+          suspected: d.suspected ? [d.suspected] : undefined,
+          photo: d.photo || null,
           token: d.token,
         });
+      E.refreshPeriods(lib, s);
       s.draft = null;
       await persist();
       announce("Запись внесена в дневник");
@@ -631,24 +810,54 @@ function renderEntry() {
   };
 }
 function renderDiary() {
-  const rows = [...s.diary].sort(
-    (a, b) =>
-      a.day.localeCompare(b.day) || a.createdAt.localeCompare(b.createdAt),
-  );
   const k = E.known(lib, s),
-    b = E.blocked(lib, s),
-    pending = Object.entries(s.decisions).filter(([, v]) => v === "pending"),
-    excluded = Object.entries(s.decisions).filter(([, v]) => v === "excluded");
-  const current = E.createPeriod(lib, s);
+    rows = [...s.diary].sort(
+      (a, b) =>
+        a.day.localeCompare(b.day) || a.createdAt.localeCompare(b.createdAt),
+    ),
+    introducing = lib.foods.filter(
+      (f) => E.introduction(lib, s, f.id).status === "introducing",
+    ),
+    accessible = lib.foods.filter(
+      (f) => E.stage(f) <= E.months(s.profile.born, day()),
+    );
   app.innerHTML =
-    title("История питания", "Дневник маленьких открытий") +
-    `<div class="no-print">${s.draft?.type === "entry" ? '<a class="button wide" href="#entry">Продолжить незавершённую запись</a>' : ""}${button("➕ Добавить продукты", "manual", "primary")}${button("📄 Печать / PDF", "print")}<details><summary>✅ Уже ввели · ${k.size}</summary><p>${esc([...k].map((id) => idx.get(id)?.name).join(", ") || "Пока нет записей")}</p></details><details><summary>🥕 Ещё не ввели</summary><p>${esc(
-      (current?.ids || [])
-        .filter((id) => !idx.get(id)?.ingredients && !k.has(id))
-        .map((id) => idx.get(id).name)
-        .join(", ") || "Нет активных целей",
-    )}</p></details><details open><summary>🩺 На проверке у педиатра · ${pending.length}</summary>${pending.map(([id]) => `<p>${esc(idx.get(id)?.name)} ${button("Вернуть", `return:${id}`)}${button("Исключить", `exclude:${id}`)}</p>`).join("") || "<p>Нет продуктов на проверке</p>"}<p class="muted">Не утверждаем, что эти ингредиенты вызвали реакцию. Решение о возвращении обсудите с врачом. История реакций сохраняется.</p></details><details><summary>Исключены из питания · ${b.size}</summary><p>${esc([...b].map((id) => idx.get(id)?.name || "Нераспознанное исключение").join(", ") || "Нет")}</p>${excluded.map(([id]) => button("Вернуть " + esc(idx.get(id)?.name), `return:${id}`)).join("")}</details><a class="button" href="#reactions">⚠️ Памятка по реакциям</a></div><h2>Хронология</h2><p class="print-only">${esc(s.profile.name)} · дата рождения ${dateText(s.profile.born)}. ${E.NOTICE}</p>${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Дата</th><th>Продукт / блюдо</th><th>Форма</th><th>Количество</th><th>Реакция</th><th class="no-print"></th></tr></thead><tbody>${rows.map((r) => `<tr><td>${dateText(r.day)}</td><td>${esc(r.name)}${r.status === "skipped" ? " (пропущено)" : ""}<small>${esc(r.slot)}</small>${r.comment ? `<p>${esc(r.comment)}</p>` : ""}</td><td>${esc(r.status === "skipped" ? "-" : r.form)}</td><td>${esc(r.status === "skipped" ? "-" : r.quantity)}</td><td style="white-space:pre-wrap">${esc(r.status === "skipped" ? "-" : r.reaction)}</td><td class="no-print">${r.status !== "skipped" ? button("Изменить", `editentry:${r.id}`) : ""}</td></tr>`).join("")}</tbody></table></div>` : '<div class="card empty"><span class="symbol">🌱</span><p>Здесь появятся ваши записи.</p></div>'}<div class="no-print">${home()}</div>`;
+    title("Дневник и прогресс", "Маленькие открытия") +
+    `<div class="card lavender"><h2>${k.size} из 119 продуктов</h2><progress max="119" value="${k.size}"></progress><p>В знакомстве: ${introducing.length}. Возрастной ассортимент: ${accessible.filter((f) => k.has(f.id)).length} / ${accessible.length}.</p><small>Обзор разнообразия, а не оценка медицинского развития.</small><p>Текущий месячный план: ${(() => {
+      const p = E.currentPeriod(lib, s),
+        ids = (p?.initial_ids || p?.ids || []).filter(
+          (id) => !(p?.omitted || []).includes(id),
+        );
+      return ids.filter((id) => k.has(id)).length + " / " + ids.length;
+    })()} продуктов завершили знакомство.</p></div>${button("➕ Добавить продукты", "manual", "primary")}${s.draft?.type === "entry" ? '<a class="button" href="#entry">Продолжить запись</a>' : ""}<div class="row">${button("📄 Открыть PDF", "pdf:open")}${button("Сохранить PDF", "pdf:save")}${button("Поделиться PDF", "pdf:share")}</div><details><summary>Прогресс по категориям</summary>${[
+      ...new Set(lib.foods.map((f) => f.category)),
+    ]
+      .map((c) => {
+        const foods = lib.foods.filter((f) => f.category === c);
+        return `<p>${esc(c)}: ${foods.filter((f) => k.has(f.id)).length} / ${foods.length}</p>`;
+      })
+      .join("")}</details>${[
+      "introduced",
+      "introducing",
+      "not_introduced",
+      "review",
+      "excluded",
+      "deferred",
+    ]
+      .map((status) => {
+        const foods = lib.foods.filter((f) => {
+          const v = E.introduction(lib, s, f.id);
+          return status === "not_introduced"
+            ? ["not_introduced", "planned"].includes(v.status)
+            : v.status === status;
+        });
+        return `<details ${status === "review" ? "open" : ""}><summary>${{ introduced: "✅ Введённые", introducing: "🌱 В процессе знакомства", not_introduced: "🥕 Ещё не введённые", review: "🩺 На проверку врачу", excluded: "Исключённые", deferred: "Отложенные" }[status]} · ${foods.length}</summary>${foods.map((f) => `<p>${cap(f.name)} ${E.allergenGroups(f).length ? "⚠️" : ""} <small>${statusText(E.introduction(lib, s, f.id))}</small>${["review", "excluded"].includes(status) ? button("Вернуть", `return:${f.id}`) + button("Исключить", `exclude:${f.id}`) : ""}</p>`).join("")}</details>`;
+      })
+      .join(
+        "",
+      )}<h2>Фактические кормления</h2>${rows.map((r) => `<div class="card"><small>${dateText(r.day)} · ${esc(r.slot)} · ${{ eaten: "Поели", offered: "Ранее отмечено; факт поедания не уточнён", skipped: "Не пробовали", refused: "Отказался" }[r.status]}</small><h3>${cap(r.name)}</h3><p>${esc(r.form)} · ${esc(r.quantity)}</p><p>${esc(r.reaction)} ${esc(r.comment || "")}</p>${r.photo ? `<img class="diary-photo" src="${r.photo}" alt="Фото к записи">` : ""}<small>${r.ingredients.map((id) => `${cap(idx.get(id)?.name)}: ${statusText(E.introduction(lib, s, id, r.day))}`).join(" · ")}</small>${r.status === "eaten" ? button("Изменить", `editentry:${r.id}`) : ""}</div>`).join("") || "<p>Пока нет записей.</p>"}<a class="button" href="#reactions">Памятка по реакциям</a>`;
 }
+
 function renderPreparation() {
   const labels = {
     preparation: "Безопасная подготовка",
@@ -663,7 +872,7 @@ function renderPreparation() {
       .filter((m) => labels[m.id])
       .map(
         (m) =>
-          `<div class="card"><h2>${labels[m.id]}</h2><p>${esc(m.text)}</p><p class="muted">Исходный статус: ${esc(m.status)}</p></div>`,
+          `<div class="card"><h2>${labels[m.id]}</h2><p>${esc(m.text)}</p><p class="muted">Требует проверки педиатром</p></div>`,
       )
       .join("") +
     home();
@@ -676,7 +885,7 @@ function renderReactions() {
 function renderSettings() {
   app.innerHTML =
     title("Всё под вашим контролем", "Настройки") +
-    `<div class="card"><h2>На вашем телефоне</h2><p>Данные находятся в этом браузере. Аккаунта и синхронизации нет. Сохраните резервную копию перед очисткой браузера или сменой телефона.</p>${button("Экспорт резервной копии", "export", "primary")}<label for="import">Восстановить из файла JSON</label><input id="import" type="file" accept="application/json,.json"><p class="muted">Импорт заменит данные после проверки и подтверждения. Копия содержит личные сведения — не публикуйте её.</p></div>` +
+    `<details><summary>Дополнительные настройки: резервная копия</summary><div class="card"><h2>На вашем телефоне</h2><p>Данные находятся в этом браузере. Аккаунта и синхронизации нет. Сохраните резервную копию перед очисткой браузера или сменой телефона.</p>${button("Экспорт резервной копии", "export", "primary")}<label for="import">Восстановить из файла</label><input id="import" type="file" accept="application/json,.json"><p class="muted">Импорт заменит данные после проверки и подтверждения. Копия содержит личные сведения — не публикуйте её.</p></div></details>` +
     (active()
       ? `<form id="preferences" class="card"><h2>Профиль и безопасность</h2>${summary(s.profile)}${field("Имя ребёнка", "profile_name", s.profile.name, "text", 'required maxlength="100"')}${field("Дата рождения ребёнка", "profile_born", s.profile.born, "date", `required max="${day()}"`)}${field("Уже введённые продукты через запятую", "introduced_names", s.profile.introduced_names.join(","), "text", 'maxlength="5000"')}${select(
           "Медицинские ограничения",
@@ -718,22 +927,38 @@ function renderSettings() {
           ],
           s.profile.meal_count || "",
         )}${field("Исключения через запятую", "excluded", s.profile.excluded_names.join(","), "text", 'maxlength="5000"')}${field("Недоступные продукты через запятую", "unavailable", (s.profile.unavailable_foods || []).join(","), "text", 'maxlength="5000"')}${field("Часовой пояс (например Europe/Moscow)", "zone", s.profile.zone, "text", "required")}${select(
-          "Напоминания внутри открытой PWA",
+          "Напоминания внутри приложения",
           "notifications",
           [
             ["no", "Выключены"],
             ["yes", "Включены"],
           ],
           s.profile.notifications_requested ? "yes" : "no",
-        )}${field("Утреннее напоминание внутри приложения", "time", s.profile.time || "09:00", "time")}<p class="notice">При закрытом приложении уведомления не отправляются. Здесь нет фоновой рассылки. Вечерняя проверка неотмеченных приёмов видна при открытии «Сегодня».</p><details><summary>Индивидуальный сценарий врача для 4–5 месяцев</summary><label><input name="early" type="checkbox" ${s.profile.early_doctor_confirmed ? "checked" : ""}>Начало согласовано с врачом</label>${field("Дата консультации", "consultation", s.profile.doctor_consultation_date || "", "date", `max="${day()}"`)}${field("Рекомендации врача (своими словами)", "doctor_note", s.profile.doctor_plan_note || "", "text", 'maxlength="5000"')}${field("Разрешённые врачом продукты из базы через запятую", "doctor_foods", (s.profile.doctor_foods || []).map((id) => idx.get(id)?.name).join(","), "text", 'maxlength="5000"')}<p class="muted">Не стандартная схема. Возрастные условия, готовность, исключения и реакции сохраняются.</p></details><button type="submit" class="primary">Сохранить настройки</button></form><div class="card"><h2>Управление данными</h2>${button("🔄 Начать заново / удалить данные", "reset", "danger")}<p class="muted">Удаляются анкета, согласие, план, дневник и черновики только в этой PWA. Telegram-база не затрагивается.</p></div>`
+        )}${field("Утреннее напоминание внутри приложения", "time", s.profile.time || "09:00", "time")}${field("Вечернее напоминание внутри приложения", "evening_time", s.profile.evening_time || "19:00", "time")}<p class="notice">При закрытом приложении уведомления не отправляются. Здесь нет фоновой рассылки. Вечерняя проверка неотмеченных приёмов видна при открытии «Сегодня».</p><details><summary>Индивидуальный сценарий врача для 4–5 месяцев</summary><label><input name="early" type="checkbox" ${s.profile.early_doctor_confirmed ? "checked" : ""}>Начало согласовано с врачом</label>${field("Дата консультации", "consultation", s.profile.doctor_consultation_date || "", "date", `max="${day()}"`)}<p class="muted">Не стандартная схема. Возрастные условия, готовность, исключения и реакции сохраняются.</p></details><label><input name="skills_confirmed" type="checkbox" ${s.profile.skills_confirmed ? "checked" : ""}>Подтверждаю навыки выбранной текстуры</label>${select(
+          "Режим знакомства",
+          "introduction_mode",
+          [
+            ["conservative", "Завершать одно знакомство"],
+            ["overlap", "Перекрывающиеся циклы: тест, требует проверки врача"],
+          ],
+          s.profile.introduction_mode || "conservative",
+        )}<button type="submit" class="primary">Сохранить настройки</button></form><div class="card"><h2>Управление данными</h2>${button("🔄 Начать заново / удалить данные", "reset", "danger")}<p class="muted">Удаляются анкета, согласие, план, дневник и черновики только в этой PWA. Telegram-база не затрагивается.</p></div>`
       : '<a class="button" href="#today">Начать анкету</a>') +
-    `<div class="card"><h2>Установить на телефон</h2>${button("Установить приложение", "install")}<p>Android: меню браузера → «Установить приложение». iPhone: откройте в Safari → «Поделиться» → «На экран Домой».</p><p class="muted">Для первого открытия нужен интернет. После загрузки приложение работает офлайн. Для обновления откройте с интернетом и затем закройте все окна PWA.</p>${button("Защитить локальное хранилище от автоочистки", "storage")}</div><a class="button" href="#library">📚 Библиотека</a>${home()}`;
+    `<div class="card"><h2>Установить на телефон</h2>${button("Установить приложение", "install")}<p>Android: меню браузера → «Установить приложение». iPhone: откройте в Safari → «Поделиться» → «На экран Домой».</p><p class="muted">Для первого открытия нужен интернет. После загрузки приложение работает офлайн. Для обновления откройте с интернетом и затем закройте все окна приложения.</p>${button("Защитить локальное хранилище от автоочистки", "storage")}</div><a class="button" href="#library">📚 Библиотека</a>${home()}`;
   $("#import").onchange = (e) =>
     run(async () => {
       const file = e.target.files[0];
       if (!file) return;
-      if (file.size > 5000000) throw Error("Файл слишком большой");
-      const imported = E.validateBackup(JSON.parse(await file.text()), lib);
+      if (file.size > 40000000) throw Error("Файл слишком большой");
+      let parsed;
+      try {
+        parsed = JSON.parse(await file.text());
+      } catch {
+        throw Error(
+          "Не удалось прочитать резервную копию. Проверьте выбранный файл.",
+        );
+      }
+      const imported = E.validateBackup(parsed, lib);
       if (!confirm("Заменить все локальные данные этой резервной копией?"))
         return;
       await save(db, imported);
@@ -743,13 +968,33 @@ function renderSettings() {
       announce("Резервная копия восстановлена");
       go("today");
     });
+  if ($("#preferences")) {
+    const form = $("#preferences"),
+      draft = s.ui.settingsDraft;
+    if (draft)
+      for (const element of form.elements)
+        if (element.name && Object.hasOwn(draft, element.name)) {
+          if (element.type === "checkbox")
+            element.checked = draft[element.name] === "on";
+          else element.value = draft[element.name];
+        }
+    form.oninput = () => {
+      s.ui.settingsDraft = Object.fromEntries(new FormData(form));
+      persist().catch(errorMessage);
+    };
+    form.onchange = form.oninput;
+  }
   if ($("#preferences"))
     $("#preferences").onsubmit = (e) => {
       e.preventDefault();
       run(async () => {
         const f = new FormData(e.target);
-        E.today(f.get("zone"));
-        const names = E.split(f.get("doctor_foods")),
+        try {
+          E.today(f.get("zone"));
+        } catch {
+          throw Error("Проверьте часовой пояс, например Europe/Moscow");
+        }
+        const names = [],
           resolved = names.map((n) => E.resolve(lib, n));
         if (resolved.some((r) => r.length !== 1 || r[0].ingredients))
           throw Error(
@@ -760,6 +1005,8 @@ function renderSettings() {
           f.get("profile_born") > day()
         )
           throw Error("Проверьте дату рождения");
+        if (f.get("food_skill") !== "puree" && !f.has("skills_confirmed"))
+          throw Error("Подтвердите навыки выбранной текстуры");
         const p = s.profile;
         Object.assign(p, {
           name: f.get("profile_name").trim(),
@@ -767,6 +1014,8 @@ function renderSettings() {
           risk: f.get("risk"),
           introduced_names: E.split(f.get("introduced_names")),
           food_skill: f.get("food_skill"),
+          skills_confirmed: f.has("skills_confirmed"),
+          introduction_mode: f.get("introduction_mode") || "conservative",
           ready: f.get("ready") === "yes",
           meal_count: f.get("meal_count") ? Number(f.get("meal_count")) : null,
           excluded_names: E.split(f.get("excluded")),
@@ -774,12 +1023,14 @@ function renderSettings() {
           zone: f.get("zone"),
           notifications_requested: f.get("notifications") === "yes",
           time: f.get("time"),
+          evening_time: f.get("evening_time"),
           early_doctor_confirmed: f.has("early"),
           doctor_consultation_date: f.get("consultation"),
-          doctor_plan_note: f.get("doctor_note"),
+          doctor_plan_note: s.profile.doctor_plan_note || null,
           doctor_foods: resolved.map((r) => r[0].id),
         });
         E.refreshPeriods(lib, s);
+        delete s.ui.settingsDraft;
         await persist();
         announce("Настройки сохранены");
         go("today");
@@ -795,7 +1046,7 @@ function renderEditPlan() {
   const p = s.periods.find((p) => p.start === d.start);
   app.innerHTML =
     title("Изменения без спешки", "Замена позиций") +
-    `<p>Исходный список целиком:</p>${grouped(p.ids)}<form id="replace">${field("Что заменить (названия через запятую)", "old", d.old || "", "text", 'required maxlength="10000"')}${field("На что заменить (в том же порядке; пусто — подобрать)", "targets", d.targets || "", "text", 'maxlength="10000"')}<button class="primary">Подготовить замены</button></form>${d.proposals ? `<div class="card"><h2>Проверьте изменения</h2>${d.proposals.map(([a, b]) => `<p>${esc(idx.get(a)?.name)} → ${esc(idx.get(b)?.name)}</p>`).join("")}${button("Подтвердить все замены", "confirmreplace", "primary")}</div>` : ""}<a class="button" href="#library">Посмотреть варианты из базы</a>${home()}`;
+    `<p>Исходный список целиком:</p>${grouped(p.ids)}<form id="replace">${field("Что заменить (названия через запятую)", "old", d.old || "", "text", 'required maxlength="10000"')}${field("На что заменить (в том же порядке; пусто — подобрать)", "targets", d.targets || "", "text", 'maxlength="10000"')}<button class="primary">Подготовить замены</button></form>${d.proposals ? `<div class="card"><h2>Проверьте изменения</h2>${d.proposals.map(([a, b]) => `<p>${esc(idx.get(a)?.name)} → ${esc(idx.get(b)?.name)}</p>`).join("")}${button("Подтвердить все замены", "confirmreplace", "primary")}${button("Другие варианты", "replacementOptions")}</div>` : ""}<a class="button" href="#library">Посмотреть варианты из базы</a>${home()}`;
   $("#replace").oninput = (e) => {
     const f = new FormData(e.currentTarget);
     d.old = f.get("old");
@@ -827,13 +1078,18 @@ function renderEditPlan() {
             );
           b = matches[0];
         } else
-          b = [...idx.values()].find(
+          b = E.replacementCandidates(lib, s, a, p.start).find(
             (i) =>
               i.category === a.category &&
-              !occupied.has(i.id) &&
-              E.eligible(lib, s, i, d.start),
+              !proposals.some(([, id]) => id === i.id) &&
+              E.foodOK(lib, s, i.id, d.start, true, true),
           );
-        if (!b || !E.eligible(lib, s, b, d.start))
+        if (
+          !b ||
+          b.category !== a.category ||
+          E.stage(b) > E.months(s.profile.born, d.start) + 1 ||
+          !E.foodOK(lib, s, b.id, d.start, true, true)
+        )
           throw Error(
             "Безопасная замена не найдена. Выберите доступную позицию из библиотеки.",
           );
@@ -858,12 +1114,15 @@ function renderShopping() {
     return;
   }
   const totals = new Map();
-  for (let n = 0; n < 30; n++) {
-    const date = E.addDays(period.start, n);
-    if (date < day()) continue;
-    for (const meal of E.getMenu(lib, s, date).filter(
-      (m) => m.status === "pending",
-    )) {
+  const from = period.start > day() ? period.start : day();
+  const days = Math.max(
+    0,
+    Math.round(
+      (Date.parse(E.addDays(period.start, 30)) - Date.parse(from)) / 86400000,
+    ),
+  );
+  for (const projected of E.forecastMenus(lib, s, from, days)) {
+    for (const meal of projected.meals.filter((m) => m.status === "pending")) {
       const item = meal.snapshot;
       for (const ingredient of item.ingredients || [
         { food_id: item.id, amount: null, unit: "" },
@@ -886,12 +1145,12 @@ function renderShopping() {
   }
   app.innerHTML =
     title("Для будущих блюд", "Список покупок") +
-    '<p class="notice">Расчётная закладка для приготовления, не норма съедания ребёнка. Новые продукты меняются по фактическому дневнику; список нужно пересчитывать.</p>' +
+    '<p class="notice">Предварительная закладка для приготовления при успешном знакомстве без пропусков и реакций. Это не норма съедания. Прогноз не записывается в дневник; список пересчитывается по фактическим событиям.</p>' +
     [...totals.values()]
       .sort((a, b) => a.category.localeCompare(b.category))
       .map(
         (i) =>
-          `<p><strong>${esc(i.name)}</strong> — ${i.unknown ? "количество не задано" : esc(i.amount + " " + i.unit)}<small> · ${esc(i.category)}</small></p>`,
+          `<p><strong>${cap(i.name)}</strong> — ${i.unknown ? "количество не задано" : esc(i.amount + " " + i.unit)}<small> · ${esc(i.category)}</small></p>`,
       )
       .join("") +
     home();
@@ -934,9 +1193,9 @@ app.addEventListener("click", (e) => {
     }
     if (action === "back") {
       step--;
-      if (step === 8 && !onboarding.notifications_requested) step--;
-      if (step === 6 && onboarding.risk === "no") step--;
-      if (step === 4 && !onboarding.started) step--;
+      if (false && step === 8 && !onboarding.notifications_requested) step--;
+      if (false && step === 6 && onboarding.risk === "no") step--;
+      if (false && step === 4 && !onboarding.started) step--;
       if (onboarding.consent) {
         s.draft = { type: "onboarding", answers: onboarding, step };
         await persist();
@@ -970,7 +1229,7 @@ app.addEventListener("click", (e) => {
       go("meal/" + encodeURIComponent(value));
       return;
     }
-    if (["ate", "other"].includes(action)) {
+    if (["ate", "other", "reaction"].includes(action)) {
       if (
         s.draft?.type === "entry" &&
         !confirm("Заменить незавершённую запись новой?")
@@ -982,21 +1241,59 @@ app.addEventListener("click", (e) => {
         type: "entry",
         day: d,
         mealID: id,
-        planned: action === "ate",
-        name: action === "ate" ? m.name : "",
+        planned: action !== "other",
+        name: action !== "other" ? m.name : "",
         ids: m.ingredients,
         form: "-",
         quantity: "-",
-        reaction: "Нет реакции",
+        reaction: action === "reaction" ? "Другое" : "Нет реакции",
         token: crypto.randomUUID(),
       };
       await persist();
       go("entry");
       return;
     }
-    if (action === "skip") {
+    if (action === "dish") {
+      const [d, id] = value.split("|"),
+        m = s.menus[d].find((m) => m.id === id),
+        known = E.known(lib, s, d);
+      const candidates = [...lib.recipes, ...lib.foods].filter(
+        (i) =>
+          i.id !== m.key &&
+          E.eligible(lib, s, i, d, true) &&
+          E.ingredients(lib, i.id).every(
+            (k) => known.has(k) || m.newIDs.includes(k),
+          ) &&
+          m.newIDs.every((k) => E.ingredients(lib, i.id).includes(k)),
+      );
+      app.innerHTML =
+        title("Замена блюда", "Выберите безопасный вариант") +
+        (candidates.length
+          ? candidates
+              .map((i) =>
+                button(cap(i.name), `chooseDish:${d}|${id}|${i.id}`, "wide"),
+              )
+              .join("")
+          : "<p>Безопасной замены с сохранением знакомства нет. Можно отметить отказ или пропуск.</p>") +
+        `<a class="button" href="#meal/${encodeURIComponent(d + "|" + id)}">Назад</a>`;
+      return;
+    }
+    if (action === "chooseDish") {
+      const [d, id, key] = value.split("|");
+      E.replaceDish(lib, s, d, id, key);
+      await persist();
+      announce("Блюдо заменено; история сохранена");
+      go("today/" + d);
+      return;
+    }
+    if (action === "skip" || action === "refuse") {
       const [d, id] = value.split("|");
-      E.record(lib, s, { day: d, mealID: id, skip: true });
+      E.record(lib, s, {
+        day: d,
+        mealID: id,
+        skip: action === "skip",
+        refused: action === "refuse",
+      });
       await persist();
       announce("Пропуск сохранён. Продукт не считается введённым.");
       go("today/" + d);
@@ -1014,7 +1311,7 @@ app.addEventListener("click", (e) => {
         name: idx.get(value)?.name || "",
         form: "-",
         quantity: "-",
-        reaction: "Нет реакции",
+        reaction: action === "reaction" ? "Другое" : "Нет реакции",
         token: crypto.randomUUID(),
       };
       await persist();
@@ -1055,8 +1352,8 @@ app.addEventListener("click", (e) => {
       go("entry");
       return;
     }
-    if (action === "print") {
-      window.print();
+    if (action === "print" || action === "pdf") {
+      await showPDF(lib, s, value || "save");
       return;
     }
     if (["return", "exclude"].includes(action)) {
@@ -1078,7 +1375,7 @@ app.addEventListener("click", (e) => {
       s.periods.find((p) => p.start === value).accepted = true;
       await persist();
       announce("План принят");
-      renderPlan(value);
+      go("today");
       return;
     }
     if (action === "nextperiod") {
@@ -1092,13 +1389,40 @@ app.addEventListener("click", (e) => {
       go("editplan");
       return;
     }
+    if (action === "replacementOptions") {
+      const draft = s.draft;
+      app.innerHTML =
+        title("Замена продуктов", "Другие безопасные варианты") +
+        (draft.proposals || [])
+          .map(([old]) => {
+            const food = idx.get(old),
+              candidates = E.replacementCandidates(lib, s, food, draft.start);
+            return `<details open><summary>Вместо ${cap(food.name)}</summary>${candidates.length ? candidates.map((f) => button(cap(f.name), `pickProduct:${old}|${f.id}`)).join("") : "<p>Безопасной замены нет.</p>"}</details>`;
+          })
+          .join("") +
+        `<a class="button" href="#editplan">Вернуться к подтверждению</a>`;
+      return;
+    }
+    if (action === "pickProduct") {
+      const [old, target] = value.split("|"),
+        draft = s.draft;
+      const pairs = draft.proposals.map(([a, b]) => [
+        a,
+        a === old ? target : b,
+      ]);
+      draft.targets = pairs.map(([, id]) => idx.get(id).name).join(", ");
+      delete draft.proposals;
+      await persist();
+      go("editplan");
+      return;
+    }
     if (action === "confirmreplace") {
       const d = s.draft,
         p = s.periods.find((p) => p.start === d.start);
       if (p.revision !== d.revision)
         throw Error("План изменился. Подготовьте замены заново.");
       if (
-        d.proposals.some(([, id]) => !E.eligible(lib, s, idx.get(id), d.start))
+        d.proposals.some(([, id]) => !E.foodOK(lib, s, id, d.start, true, true))
       )
         throw Error("Ограничения изменились. Проверьте замены.");
       p.ids = [
@@ -1109,12 +1433,19 @@ app.addEventListener("click", (e) => {
       p.omitted = [
         ...new Set([...(p.omitted || []), ...d.proposals.map(([id]) => id)]),
       ];
+      p.replacement_ids = [
+        ...new Set([
+          ...(p.replacement_ids || []),
+          ...d.proposals.map(([, id]) => id),
+        ]),
+      ];
       p.revision++;
       s.changes.push({
         at: new Date().toISOString(),
         action: "replace",
         proposals: d.proposals,
       });
+      E.refreshPeriods(lib, s);
       s.draft = null;
       await persist();
       announce("Замены сохранены. Завершённые записи сохранены.");
