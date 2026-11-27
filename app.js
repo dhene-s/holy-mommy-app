@@ -692,7 +692,7 @@ function renderEntry() {
         ["Другое", "Другое"],
       ],
       d.reaction || "Нет реакции",
-    )}<label for="symptoms">Симптомы или комментарий (сохраним исходный текст)</label><textarea id="symptoms" name="symptoms" maxlength="5000">${esc(d.symptoms || "")}</textarea><p class="muted">Неизвестные названия сохраняются без рекомендаций. При реакции возможные ингредиенты отправляются на проверку педиатру; приложение не определяет причину.</p>${d.planned ? `<fieldset><legend>Какие компоненты ребёнок действительно съел?</legend>${d.ids.map((id) => `<label><input type="checkbox" name="consumed" value="${id}" ${!d.consumed_ids || d.consumed_ids.includes(id) ? "checked" : ""}>${cap(idx.get(id).name)}</label>`).join("")}</fieldset>` : ""}<label for="suspected">При реакции подозреваемый ингредиент</label><select id="suspected" name="suspected"><option value="">Не знаю — учесть все ингредиенты</option>${(d.ids || []).map((id) => `<option value="${id}" ${d.suspected === id ? "selected" : ""}>${cap(idx.get(id).name)}</option>`).join("")}</select><label for="photo">Фото по желанию — только на устройстве</label><input id="photo" type="file" accept="image/jpeg,image/png,image/webp"><label><input type="checkbox" id="photo-consent">Разрешаю сохранить выбранное фото в дневнике</label>${d.photo ? "<p>Фото сохранено в черновике</p>" : ""}<button class="primary" type="submit">Сохранить запись</button><a class="button" href="#reactions">⚠️ Экстренная памятка</a></form>${home()}`;
+    )}<label for="symptoms">Симптомы или комментарий (сохраним исходный текст)</label><textarea id="symptoms" name="symptoms" maxlength="5000">${esc(d.symptoms || "")}</textarea><label for="extra_comment">Дополнительный комментарий</label><textarea id="extra_comment" name="extra_comment" maxlength="5000">${esc(d.extra_comment||"")}</textarea><p class="muted">Неизвестные названия сохраняются без рекомендаций. При реакции возможные ингредиенты отправляются на проверку педиатру; приложение не определяет причину.</p>${d.planned ? `<fieldset><legend>Какие компоненты ребёнок действительно съел?</legend>${d.ids.map((id) => `<label><input type="checkbox" name="consumed" value="${id}" ${!d.consumed_ids || d.consumed_ids.includes(id) ? "checked" : ""}>${cap(idx.get(id).name)}</label>`).join("")}</fieldset>` : ""}<label for="suspected">При реакции подозреваемый ингредиент</label><select id="suspected" name="suspected"><option value="">Не знаю — учесть все ингредиенты</option>${(d.ids || []).map((id) => `<option value="${id}" ${d.suspected === id ? "selected" : ""}>${cap(idx.get(id).name)}</option>`).join("")}</select><label for="photo">Фото по желанию — только на устройстве</label><input id="photo" type="file" accept="image/jpeg,image/png,image/webp"><label><input type="checkbox" id="photo-consent">Разрешаю сохранить выбранное фото в дневнике</label>${d.photo ? "<p>Фото сохранено в черновике</p>" : ""}<button class="primary" type="submit">Сохранить запись</button><a class="button" href="#reactions">⚠️ Экстренная памятка</a></form>${home()}`;
   const form = $("#entry");
   form.oninput = () => {
     const f = new FormData(form);
@@ -703,6 +703,7 @@ function renderEntry() {
       quantity: f.get("quantity"),
       reaction: f.get("reaction"),
       symptoms: f.get("symptoms"),
+      extra_comment:f.get("extra_comment"),
       consumed_ids: f.getAll("consumed"),
       suspected: f.get("suspected"),
     });
@@ -760,7 +761,7 @@ function renderEntry() {
           ? d.symptoms
           : d.reaction
         : "Нет реакции";
-      const comment = hasReaction ? "" : d.symptoms || "";
+      const comment = [d.extra_comment,hasReaction?"":d.symptoms].filter(Boolean).join("\n");
       if (d.editID) {
         const old = s.diary.find((r) => r.id === d.editID);
         if (!old) throw Error("Запись не найдена");
@@ -1345,6 +1346,7 @@ app.addEventListener("click", (e) => {
         )
           ? row.reaction
           : "Другое",
+        extra_comment:row.reaction==="Нет реакции"?"":row.comment||"",
         symptoms:
           row.reaction === "Нет реакции" ? row.comment || "" : row.reaction,
       };
