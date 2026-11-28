@@ -1,3 +1,5 @@
+import { normalizeName, splitTerms, isEmptyName, recognizeName } from "./names.js";
+export { recognizeName, isEmptyName };
 import { POLICY } from "./policy.js";
 import { RULES, TUNING } from "./rules.js";
 // Browser port of bot/prikorm/meal_service.py. No Telegram, network or storage calls.
@@ -8,17 +10,8 @@ const previews = new WeakMap();
 export const CONSENT_VERSION = "pwa-v2-2026-11-27.1";
 export const NOTICE =
   "Тестовый материал. Не проверено педиатром. Не использовать как рекомендацию по кормлению";
-export const norm = (s) =>
-  String(s ?? "")
-    .toLocaleLowerCase("ru")
-    .replaceAll("ё", "е")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
-export const split = (s) =>
-  String(s ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+export const norm = normalizeName;
+export const split = splitTerms;
 export const today = (zone = "Europe/Moscow", now = new Date()) => {
   const p = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
@@ -67,11 +60,48 @@ export function libraryIndex(lib) {
   return new Map([...lib.foods, ...lib.recipes].map((i) => [i.id, i]));
 }
 export function resolve(lib, text) {
-  const all = [...lib.foods, ...lib.recipes],
-    q = norm(text);
-  if (!q) return [];
-  const exact = all.filter((i) => norm(i.name) === q);
-  return exact.length ? exact : all.filter((i) => norm(i.name).includes(q));
+  const r = recognizeName(lib, text);
+  return r.status === "resolved" || r.matches.length > 1 ? r.matches : [];
+}
+export function constraintMatch(lib, text) {
+  if (isEmptyName(text)) return {status:"empty",foods:[],suggestions:[]};
+  const q=norm(text), groupAliases={"молочные продукты":"молочные","молочное":"молочные","крупы":"крупы и злаки","орехи":"орехи и семена","рыба":"рыба и морепродукты","рыбы":"рыба и морепродукты","рыбу":"рыба и морепродукты","яиц":"яйца","орехов":"орехи и семена","молочных продуктов":"молочные","мясо":"мясо и птица","яйца":"яйца"},group=groupAliases[q]||q;
+  const category=lib.foods.filter(f=>norm(f.category)===group||allergenGroups(f).some(g=>norm(g)===group||(group==="молочные"&&norm(g)==="молоко")));
+  if(category.length)return {status:"resolved",foods:category,suggestions:[]};
+  const r=recognizeName(lib,text,{foodsOnly:true});
+  return {...r,foods:r.status==="resolved"?r.matches:[]};
+}
+export function profileNameIssues(lib, profile, state=null) {
+ const result=[];
+ for(const field of ["excluded_names","unavailable_foods","introduced_names"])
+  for(const [index,term] of (profile?.[field]||[]).entries()){
+   const r=field==="introduced_names"?recognizeName(lib,term,{foodsOnly:true}):constraintMatch(lib,term);
+   if(!["resolved","empty"].includes(r.status))result.push({field,index,term,status:r.status,suggestions:r.suggestions,blocking:field!=="introduced_names"});
+  }
+ for(const [index,row] of (state?.unknown_reactions||[]).entries())if(!row.resolvedID){
+   const r=recognizeName(lib,row.term,{foodsOnly:true});result.push({field:"unknown_reactions",index,term:row.term,status:r.status,suggestions:r.suggestions,blocking:true});
+ }
+ return result;
+}
+export function reconcileProfile(lib,s,date=today(s.profile?.zone)) {
+ const approvals=new Map();
+ for(const p of s.periods)if(!p.ids.length&&(p.anchor_pending||addDays(p.start,30)>date)){
+   if(p.accepted)approvals.set(p,new Set(p.initial_ids||[]));p.accepted=false;
+ }
+ refreshPeriods(lib,s,date);
+ for(const [p,agreed] of approvals)if(p.ids.every(id=>agreed.has(id)))p.accepted=true;
+ return currentPeriod(lib,s,date);
+}
+export function upgradeNames(lib,s,date=today(s.profile?.zone)) {
+ if(s.profile&&s.name_resolution_version!==1){
+   for(const field of ["excluded_names","unavailable_foods","introduced_names"])if(Object.hasOwn(s.profile,field)&&!Array.isArray(s.profile[field])){
+     s.original_name_fields ||= {};s.original_name_fields[field]=structuredClone(s.profile[field]??null);
+     s.profile[field]=s.profile[field]==null?[]:split(typeof s.profile[field]==="string"?s.profile[field]:JSON.stringify(s.profile[field]));
+   }
+   upgradePlanning(lib,s,date);
+   reconcileProfile(lib,s,date);s.name_resolution_version=1;
+ }
+ return s;
 }
 export function ingredients(lib, key) {
   const r = lib.recipes.find((r) => r.id === key);
@@ -134,13 +164,8 @@ function declaredKnown(lib, profile) {
   if (old?.stamp === stamp) return old.ids;
   const ids = new Set();
   for (const name of profile.introduced_names || []) {
-    const q = norm(name);
-    if (!q) continue;
-    const exact = lib.foods.filter((f) => norm(f.name) === q),
-      matches = exact.length
-        ? exact
-        : lib.foods.filter((f) => norm(f.name).includes(q));
-    if (matches.length === 1) ids.add(matches[0].id);
+    const r = recognizeName(lib,name,{foodsOnly:true});
+    if (r.status === "resolved") ids.add(r.matches[0].id);
   }
   profiles.set(profile, { stamp, ids });
   return ids;
@@ -159,9 +184,7 @@ export function introduction(lib, s, id, asOf = today(s.profile?.zone)) {
           lib.foods.find((x) => x.id === other) || { id: other },
         ).some((g) => groups.includes(g)),
     );
-    const family = (s.profile?.excluded_names || []).some((term) =>
-      [f.name, f.category, ...groups].some((v) => norm(v).includes(norm(term))),
-    );
+    const family = (s.profile?.excluded_names || []).some(term=>constraintMatch(lib,term).foods.some(item=>item.id===id));
     return { status: excluded || family ? "excluded" : "review", count: 0 };
   }
   const declared = declaredKnown(lib, s.profile).has(id);
@@ -253,25 +276,22 @@ const blockedCache = new WeakMap();
 export function blocked(lib, s) {
   let states = blockedCache.get(lib);
   if (!states) { states = new WeakMap(); blockedCache.set(lib, states); }
-  const stamp = JSON.stringify([s.profile?.excluded_names || [], s.decisions || {}]),
+  const stamp = JSON.stringify([s.profile?.excluded_names || [], s.profile?.unavailable_foods || [], s.decisions || {}, s.unknown_reactions||[]]),
     cached = states.get(s);
   if (cached?.stamp === stamp) return new Set(cached.ids);
   const ids = new Set(),
     groups = new Set();
   for (const term of s.profile?.excluded_names || []) {
-    const q = norm(term);
-    if (!q) continue;
-    const foods = lib.foods.filter((f) =>
-      [f.name, f.category, ...allergenGroups(f)].some((v) =>
-        norm(v).includes(q),
-      ),
-    );
-    if (!foods.length) ids.add("__unresolved__");
-    foods.forEach((f) => ids.add(f.id));
+    const r=constraintMatch(lib,term);
+    if(!["resolved","empty"].includes(r.status))ids.add("__unresolved__");
+    r.foods.forEach(f=>ids.add(f.id));
   }
+  for(const term of s.profile?.unavailable_foods||[]){
+    const r=constraintMatch(lib,term);if(!["resolved","empty"].includes(r.status))ids.add("__unresolved__");
+  }
+  if((s.unknown_reactions||[]).some(row=>!row.resolvedID))ids.add("__unresolved__");
   for (const [id, decision] of Object.entries(s.decisions || {})) {
     if (decision === "returned") {
-      ids.delete(id);
       continue;
     }
     ids.add(id);
@@ -330,7 +350,7 @@ export function reason(lib, s, day) {
   if (POLICY.readiness.early_requires_doctor && age < 6 && !p.early_doctor_confirmed)
     return "В 4–5 месяцев нужно подтвердить согласование раннего начала с педиатром.";
   if (blocked(lib, s).has("__unresolved__"))
-    return "Уточните названия исключений в профиле: автоматическое меню приостановлено.";
+    return "Уточните продукт: " + profileNameIssues(lib,p,s).filter(i=>i.blocking).map(i=>`«${i.term}»`).join(", ") + ". Его нельзя безопасно учесть автоматически.";
   if (p.risk === "unknown" || p.risk == null)
     return "В анкете не уточнены медицинские ограничения. Укажите ответ в настройках профиля.";
   if (p.risk === "yes")
@@ -404,7 +424,7 @@ export function foodOK(
     s.decisions[key] !== "returned"
   )
     return false;
-  if ((p.unavailable_foods || []).some((v) => norm(v) === n)) return false;
+  if ((p.unavailable_foods || []).some((v) => constraintMatch(lib,v).foods.some(f=>f.id===key))) return false;
   return introductionWithoutRecursion(s, key, day) !== "deferred";
 }
 function introductionWithoutRecursion(s, id, day) {
@@ -1185,8 +1205,8 @@ export function getMenu(lib, s, day = today(s.profile?.zone)) {
       policy_version: POLICY.version,
     });
   }
-  s.menus[day] = results;
-  return results;
+  s.menus[day] = applyMealOverrides(lib,s,day,results);
+  return s.menus[day];
 }
 export function emergency(text) {
   return /задых|не дыш|не может дыш|затруднен.*дых|затруднён.*дых|отек.*(язык|горл)|отёк.*(язык|горл)|потер.*созна|обморок|синеет|удуш|анафилак|свист.*дых|осипл|резк.*слаб/i.test(
@@ -1210,6 +1230,7 @@ export function record(
     token,
     suspected,
     photo = null,
+    unplanned = false,
   },
   now = today(s.profile?.zone),
 ) {
@@ -1224,6 +1245,7 @@ export function record(
   const actual = ids ?? meal?.ingredients ?? [];
   if (
     meal &&
+    !unplanned &&
     !skip &&
     !refused &&
     actual.some((id) => !foodOK(lib, s, id, day, true))
@@ -1239,16 +1261,21 @@ export function record(
     reaction: reaction.trim() ? reaction : "-",
     comment,
     ingredients: actual,
-    newIDs: meal?.newIDs || [],
+    newIDs: actual.filter(id=>!known(lib,s,day).has(id)),
     status: refused ? "refused" : skip ? "skipped" : "eaten",
     slot: meal?.slot || "-",
-    dish_id: meal?.key || null,
-    snapshot: meal?.snapshot || null,
+    dish_id: unplanned ? (resolve(lib,name).length===1 ? resolve(lib,name)[0].id : null) : meal?.key || null,
+    snapshot: unplanned ? null : meal?.snapshot || null,
+    unplanned,
+    planned_name: unplanned ? meal?.name || null : null,
     createdAt: new Date().toISOString(),
     photo,
   };
   s.diary.push(row);
-  if (meal) meal.status = skip ? "skipped" : refused ? "refused" : "done";
+  if (meal) {
+    meal.status = skip ? "skipped" : refused ? "refused" : "done";
+    if(unplanned){meal.name=row.name;meal.ingredients=[...actual];meal.newIDs=[...row.newIDs];meal.key=row.dish_id||"";meal.snapshot={name:row.name,category:"Фактически съели",ingredient_ids:[...actual]};}
+  }
   if (row.status === "eaten") {
     const p = s.profile;
     p.calendar_started_on ||= day;
@@ -1323,6 +1350,7 @@ export function replaceDish(lib, s, day, mealID, key) {
     meal.newIDs.some((id) => !ids.includes(id))
   )
     throw Error("Замена должна сохранять текущее знакомство");
+  s.meal_overrides ||= {};s.meal_overrides[mealID]={day,key,mode:"same"};
   Object.assign(meal, {
     key,
     name: item.name,
@@ -1358,6 +1386,8 @@ export function validateBackup(data, lib) {
     !s.ui
   )
     throw Error("Неполные данные");
+  if(s.unknown_reactions!=null&&(!Array.isArray(s.unknown_reactions)||s.unknown_reactions.some(r=>!r||typeof r.term!=="string"||r.resolvedID&&(!index.has(r.resolvedID)||!["pending","returned","excluded"].includes(s.decisions[r.resolvedID])))))throw Error("Некорректные сведения о неуточнённой реакции");
+  if(s.meal_overrides!=null&&(typeof s.meal_overrides!=="object"||Array.isArray(s.meal_overrides)||Object.values(s.meal_overrides).some(o=>!o||!validDate(o.day)||!index.has(o.key)||!["same","new","familiar"].includes(o.mode))))throw Error("Некорректные замены меню");
   if (s.profile) {
     const p = s.profile;
     for (const key of [
@@ -1528,11 +1558,12 @@ export function validateBackup(data, lib) {
   return migrate(s);
 }
 export function backup(s) {
+  const portable=structuredClone(s);delete portable._revision;
   return {
     app: "holy-mommy-pwa",
     version: 1,
     exportedAt: new Date().toISOString(),
-    state: structuredClone(s),
+    state: portable,
   };
 }
 
@@ -1610,11 +1641,61 @@ export function previewMenu(lib, s, date, from = today(s.profile?.zone)) {
   if (date <= from) return getMenu(lib, s, date);
   const count = Math.floor((Date.parse(date) - Date.parse(from)) / 86400000) + 1;
   if (count > 60) return [];
-  const signature = JSON.stringify([from, s.profile, s.diary, s.decisions, s.periods, s.menus]);
+  const signature = JSON.stringify([from, s.profile, s.diary, s.decisions, s.periods, s.menus, s.meal_overrides]);
   let cached = previews.get(s);
   if (!cached || cached.signature !== signature || cached.rows.length < count) {
     cached = { signature, rows: forecastMenus(lib, s, from, count <= 30 ? 30 : 60) };
     previews.set(s, cached);
   }
   return structuredClone(cached.rows[count - 1]?.meals || []);
+}
+
+function canOfferChange(lib,s,date,meal,item,mode,otherMeals=[]) {
+ if(!item||item.id===meal.key&&mode==='same'||!eligible(lib,s,item,date,true))return false;
+ const ids=ingredients(lib,item.id),k=known(lib,s,date),fresh=ids.filter(id=>!k.has(id));
+ if(mode==='same' && (fresh.some(id=>!meal.newIDs.includes(id))||meal.newIDs.some(id=>!ids.includes(id))))return false;
+ if(mode==='familiar'&&fresh.length)return false;
+ if(mode==='new'&&(!lib.foods.some(f=>f.id===item.id)||fresh.length!==1||meal.newIDs.includes(item.id)))return false;
+ const prior=known(lib,s,addDays(date,-1)),exposed=[...new Set(s.diary.filter(r=>r.day===date&&r.status==='eaten').flatMap(r=>r.ingredients).filter(id=>!prior.has(id)))];
+ if(fresh.some(id=>!exposed.includes(id))&&exposed.length)return false;
+ const allNew=[...new Set([...fresh,...otherMeals.filter(m=>m.id!==meal.id&&m.status==='pending').flatMap(m=>m.newIDs)])];
+ if(allNew.length>1 && (allNew.some(id=>allergenGroups(lib.foods.find(f=>f.id===id)).length)||s.profile.introduction_mode!=='overlap'))return false;
+ return true;
+}
+export function mealChangeOptions(lib,s,date,mealID) {
+ const menu=getMenu(lib,s,date),meal=menu.find(m=>m.id===mealID);
+ if(!meal||meal.status!=='pending')return {same:[],new:[],familiar:[]};
+ const all=[...lib.recipes,...lib.foods],out={};
+ for(const mode of ['same','new','familiar']){const items=all.filter(item=>canOfferChange(lib,s,date,meal,item,mode,menu));out[mode]=mode==='new'?rankFoods(lib,s,items,date):items;}
+ return out;
+}
+function applyMealOverrides(lib,s,date,menu) {
+ const k=known(lib,s,date);
+ return menu.map(m=>{
+  const o=s.meal_overrides?.[m.id];if(!o||o.day!==date||m.status!=='pending')return m;
+  const item=libraryIndex(lib).get(o.key),ids=item?ingredients(lib,item.id):[];
+  if(!item||ids.some(id=>!foodOK(lib,s,id,date,true))||!eligible(lib,s,item,date,true))return m;
+  const fresh=ids.filter(id=>!k.has(id)),prior=known(lib,s,addDays(date,-1)),exposed=s.diary.filter(r=>r.day===date&&r.status==='eaten').flatMap(r=>r.ingredients).filter(id=>!prior.has(id));
+  if(fresh.some(id=>!exposed.includes(id))&&exposed.length)return m;
+  if(o.mode==='familiar'&&fresh.length)return m;
+  const others=menu.filter(x=>x.id!==m.id&&x.status==='pending').flatMap(x=>x.newIDs),combined=[...new Set([...fresh,...others])];
+  if(combined.length>1&&(combined.some(id=>allergenGroups(lib.foods.find(f=>f.id===id)).length)||s.profile.introduction_mode!=='overlap'))return m;
+  return {...m,key:item.id,name:item.name,snapshot:snapshotItem(lib,item),ingredients:ids,newIDs:fresh,change_mode:o.mode};
+ });
+}
+export function changeMeal(lib,s,date,mealID,mode,key,now=today(s.profile?.zone)) {
+ if(date<now||!['same','new','familiar'].includes(mode))throw Error('Этот приём уже прошёл. Историю можно уточнить в дневнике.');
+ const options=mealChangeOptions(lib,s,date,mealID),item=options[mode].find(i=>i.id===key);
+ if(!item)throw Error('Вариант больше не подходит. Обновите список с учётом ограничений.');
+ const meal=s.menus[date].find(m=>m.id===mealID),before=structuredClone(meal);
+ s.meal_overrides ||= {};s.meal_overrides[mealID]={day:date,key,mode};
+ if(mode==='new'){
+  const p=currentPeriod(lib,s,date);if(p&&!p.ids.includes(key))p.ids.push(key);
+ }
+ s.changes.push({action:'meal_change',day:date,mealID,mode,before,after:key,at:new Date().toISOString()});
+ refreshPeriods(lib,s,date);
+ const p=currentPeriod(lib,s,date),k=known(lib,s,date);
+ if(p)p.initial_ids=[...new Set([...(p.initial_ids||[]).filter(id=>k.has(id)),...p.ids])];
+ getMenu(lib,s,date);
+ return true;
 }

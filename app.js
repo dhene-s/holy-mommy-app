@@ -51,9 +51,18 @@ const announce = (t) => {
   $("#status").textContent = t;
   setTimeout(() => ($("#status").textContent = ""), 6000);
 };
+let savedSignature="", pendingSaves=0, conflicted=false;
 async function persist() {
-  await save(db, s);
+  if(!pendingSaves&&JSON.stringify(s)===savedSignature)return;
+  pendingSaves++;
+  try {const written=await save(db,s);savedSignature=JSON.stringify(written);} finally {pendingSaves--;}
 }
+async function syncOnFocus() {
+ if(!db||!s||working||pendingSaves||conflicted)return;
+ try {const latest=await load(db);if((latest._revision||0)!==(s._revision||0)){s=latest;savedSignature=JSON.stringify(s);onboarding=s.draft?.type==="onboarding"?s.draft.answers:null;step=s.draft?.step||0;await render();}}catch(error){errorMessage(error)}
+}
+window.addEventListener("focus",syncOnFocus);
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")syncOnFocus()});
 function go(route) {
   if (location.hash === "#" + route) render();
   else location.hash = route;
@@ -76,42 +85,34 @@ function title(kicker, text) {
   return `<p class="eyebrow">${kicker}</p><h1>${text}</h1>`;
 }
 function errorMessage(error) {
-  announce(error.message || String(error));
+  const messages={AbortError:"Загрузка заняла слишком много времени. Проверьте соединение и попробуйте снова.",InvalidStateError:"Это окно устарело после обновления. Откройте приложение снова — данные сохранены.",QuotaExceededError:"На устройстве не хватает места для сохранения. Сохраните резервную копию и освободите место.",TypeError:"Не получилось выполнить действие. Повторите попытку; сохранённые данные не удалены."};
+  announce(messages[error.name]||error.message||"Не получилось выполнить действие. Попробуйте снова.");
+  if(error.code === "STATE_CONFLICT") {
+    conflicted=true;
+    const box=document.createElement("div");box.className="notice";box.innerHTML=`<p>${esc(error.message)}</p>${button("Сохранить копию моего ввода", "export")}${button("Обновить данные", "reloadState")}`;box.id="state-conflict";if(!$("#state-conflict"))app.prepend(box);
+  }
   console.error(error);
+}
+async function loadLibrary() {
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+ try {const response=await fetch("./library.json",{signal:controller.signal});if(!response.ok)throw Error("Не удалось загрузить библиотеку");return await response.json();}finally{clearTimeout(timer)}
 }
 async function start() {
   try {
-    if (navigator.locks) {
-      const acquired = await new Promise((resolve) =>
-        navigator.locks.request(
-          "holy-mommy-editor",
-          { ifAvailable: true },
-          (lock) => {
-            resolve(Boolean(lock));
-            return lock ? new Promise(() => {}) : undefined;
-          },
-        ),
-      );
-      if (!acquired) {
-        app.innerHTML =
-          "<h1>Приложение уже открыто</h1><p>Чтобы не перезаписать дневник, закройте другое окно Holy Mommy и перезагрузите эту страницу.</p>";
-        return;
-      }
-    }
     [db, lib] = await Promise.all([
       openStore(),
-      fetch("./library.json").then((r) => {
-        if (!r.ok) throw Error("Не удалось загрузить библиотеку");
-        return r.json();
-      }),
+      loadLibrary(),
     ]);
     s = await load(db);
+    savedSignature=JSON.stringify(s);
+    E.upgradeNames(lib, s, day());
     E.upgradePlanning(lib, s, day());
-    await save(db, s);
+    try { await persist(); } catch(error) { if(error.code!=="STATE_CONFLICT") throw error; s=await load(db);savedSignature=JSON.stringify(s); }
     idx = E.libraryIndex(lib);
     onboarding = s.draft?.type === "onboarding" ? s.draft.answers : null;
     step = s.draft?.step || 0;
     await render();
+    app.dataset.booting="false";
     if ("serviceWorker" in navigator)
       navigator.serviceWorker
         .register("./sw.js", { scope: "./" })
@@ -135,8 +136,10 @@ async function start() {
           ),
         );
   } catch (error) {
+    app.dataset.booting="false";
     app.innerHTML =
-      "<h1>Не удалось открыть приложение</h1><p>Для первого запуска нужен интернет. Проверьте, что браузеру разрешено локальное хранение данных, затем перезагрузите страницу.</p>";
+      "<h1>Не удалось открыть приложение</h1><p>Для первого запуска нужен интернет. Проверьте соединение и разрешение на локальное хранение. Данные не удалены.</p><button id=retry-start>Попробовать снова</button>";
+    $("#retry-start").addEventListener("click",()=>location.reload());
     errorMessage(error);
   }
 }
@@ -154,6 +157,13 @@ document.addEventListener(
   },
   true,
 );
+const nameFields=new Set(["introduced","introduced_names","excluded","unavailable","reaction_foods","doctor_allergens","old","targets","name"]);
+app.addEventListener("input",event=>{
+ const el=event.target;if(!lib||!nameFields.has(el.name)||el.type!=="text"||(el.name==="name"&&el.form?.id!=="entry"))return;
+ let list=document.querySelector("#food-suggestions");if(!list){list=document.createElement("datalist");list.id="food-suggestions";document.body.append(list)}
+ const pieces=String(el.value).split(","),tail=pieces.pop().trim(),prefix=pieces.length?pieces.join(",")+", ":"",r=E.recognizeName(lib,tail);
+ list.innerHTML=[...new Map([...r.matches,...r.suggestions].map(i=>[i.id,i])).values()].slice(0,12).map(i=>`<option value="${esc(prefix+i.name)}"></option>`).join("");el.setAttribute("list",list.id);
+});
 window.addEventListener("hashchange", () => render().catch(errorMessage));
 async function render() {
   if (!s) return;
@@ -194,7 +204,9 @@ async function render() {
       `<div class="card lavender"><h2>Ваш спокойный помощник</h2><p>Анкета, гибкий план питания и дневник — на вашем телефоне. Без аккаунта, сервера и передачи ответов.</p></div>${note()}${button(onboarding ? "Продолжить анкету" : "Начать знакомство", "begin", "primary wide")}<a class="button wide" href="#library">📚 Библиотека · 119 продуктов и 216 рецептов</a><a class="button wide" href="#reactions">⚠️ Памятка по реакциям</a><p class="muted">Материалы предварительные. Они помогают проверить приложение, а не заменяют консультацию врача.</p>`;
     return;
   }
-  if (route === "plan") await renderPlan(arg);
+  if (route === "swap") renderSwap(arg);
+  else if (route === "clarify") renderClarify(arg);
+  else if (route === "plan") await renderPlan(arg);
   else if (route === "diary") renderDiary();
   else if (route === "meal") renderMeal(arg);
   else if (route === "entry") renderEntry();
@@ -494,7 +506,7 @@ function renderLibrary() {
   list = list.filter(
     (i) =>
       (!category || category === i.category) &&
-      E.norm(i.name).includes(E.norm(search)),
+      (E.norm(i.name).includes(E.norm(search)) || E.recognizeName(lib,search).matches.some(v=>v.id===i.id)),
   );
   page = Math.max(0, Math.min(page, Math.ceil(list.length / 20) - 1));
   app.innerHTML =
@@ -580,6 +592,30 @@ function renderCard(id) {
     '<a class="button" href="#library">← Библиотека</a>' +
     home();
 }
+function clarifyLinks() {
+  return E.profileNameIssues(lib,s.profile,s).length ? `<a class="button primary" href="#clarify/${encodeURIComponent(location.hash.slice(1)||"today")}">Уточнить продукт</a>` : '';
+}
+function nameIssueNotice() {
+ const issues=E.profileNameIssues(lib,s.profile,s);
+ return issues.length?`<div class="notice"><p>Нужно уточнить: ${issues.map(i=>esc(i.term)).join(", ")}. Неоднозначные названия не подменяются автоматически.</p>${clarifyLinks()}</div>`:"";
+}
+function renderClarify(arg) {
+ if(arg){let route="today";try{route=decodeURIComponent(arg)}catch{};s.ui.clarifyReturn=/^(today|plan|settings|diary)(\/|$)/.test(route)?route:"today";}
+ const issues=E.profileNameIssues(lib,s.profile,s),labels={excluded_names:"Исключения",unavailable_foods:"Недоступные продукты",introduced_names:"Уже введены",unknown_reactions:"Реакция — продукт на проверку"};
+ const query=s.ui.clarifyQuery||"",found=E.recognizeName(lib,query,{foodsOnly:true}),choices=[...new Map([...found.matches,...found.suggestions].map(f=>[f.id,f])).values()];
+ const candidate=s.ui.nameFix,draft=candidate&&["excluded_names","unavailable_foods","introduced_names","unknown_reactions"].includes(candidate.field)&&Number.isInteger(candidate.index)&&candidate.index>=0&&lib.foods.some(f=>f.id===candidate.key)?candidate:null;
+ app.innerHTML=title("Профиль", "Уточним названия")+field("Найти продукт в библиотеке", "clarify-query",query,"text")+(draft?`<div class="card"><p>${draft.field==="unknown_reactions" ? `Указать «${cap(idx.get(draft.key)?.name)}» как подозреваемый продукт? История реакции сохранится, продукт будет на проверке педиатра. Это не диагноз.` : `Заменить «${esc(draft.raw)}» на «${cap(idx.get(draft.key)?.name)}» в разделе «${labels[draft.field]}»?`}</p>${button("Подтвердить название","confirmName","primary")}</div>`:"")+issues.map(i=>`<div class="card"><h2>${esc(i.term)}</h2><p>${labels[i.field]}: ${i.status==="ambiguous"?"подходит несколько названий — выберите нужное":"такого названия не удалось найти"}.</p>${(query?choices:i.suggestions).map(f=>button(cap(f.name),`fixName:${i.field}|${i.index}|${f.id}`,"wide")).join("")}<p>Если нужного варианта нет, исправьте название в профиле. Медицинские исключения не будут проигнорированы.</p></div>`).join("")+(issues.length?"":"<p>Названия уточнены. Меню можно открыть.</p>")+`<a class="button" href="#settings">Исправить в профиле</a><a class="button" href="#plan">План на месяц</a><a class="button" href="#${esc(s.ui.clarifyReturn||"today")}">Назад</a>`;
+ const input=$("#clarify-query");input.oninput=()=>{const position=input.selectionStart;s.ui.clarifyQuery=input.value;persist().catch(errorMessage);renderClarify();$("#clarify-query").focus();$("#clarify-query").setSelectionRange(position,position);};
+}
+function renderSwap(arg) {
+ const [date,id]=decodeURIComponent(arg||"").split("|"),meal=s.menus[date]?.find(m=>m.id===id);
+ if(!meal||meal.status!=="pending"){go("today/"+date);return}
+ const allOptions=E.mealChangeOptions(lib,s,date,id),draft=s.ui.swap?.context===arg?s.ui.swap:null;
+ const query=draft?.query||"",options=Object.fromEntries(Object.entries(allOptions).map(([mode,items])=>[mode,items.filter(i=>!query||E.norm(i.name).includes(E.norm(query))||E.recognizeName(lib,query).matches.some(f=>f.id===i.id))]));
+ const labels={same:"Другое блюдо с тем же новым продуктом",new:"Другой подходящий новый продукт",familiar:"Блюдо из знакомых продуктов"};
+ app.innerHTML=title("Меню дня", "Чем заменим блюдо?")+`<p>${cap(meal.name)}</p>`+(!draft?.confirm?field("Поиск вариантов", "swap-search",query,"text"):"")+(draft?.confirm?`<div class="card"><h2>Проверьте замену</h2><p>${cap(meal.name)} → ${cap(idx.get(draft.key)?.name)}</p><p>${draft.mode==="familiar"?"Знакомство с новым продуктом перенесётся. Продукт не будет считаться введённым.":"Изменится предложение в меню, а не фактическая запись дневника."}</p>${button("Подтвердить замену","swapConfirm","primary")}</div>`:"")+Object.entries(labels).map(([mode,label])=>`<div class="card">${button(label,`swapMode:${mode}`,"wide")}${draft?.mode===mode&&!draft.confirm?(options[mode].length?options[mode].map(i=>button(cap(i.name),`swapPick:${date}|${id}|${mode}|${i.id}`,"wide")).join(""):(query&&allOptions[mode].length?'<p>По этому названию ничего не найдено. Очистите поиск или выберите другое действие.</p>'+button('Очистить поиск','swapClear'):'<p>Сейчас подходящих вариантов нет с учётом возраста, навыков, ограничений и сегодняшнего знакомства. Можно выбрать другое действие ниже.</p>')):""}</div>`).join("")+button("Указать, что ребёнок съел",`other:${date}|${id}`,"wide")+button("Пропустить приём прикорма",`skip:${date}|${id}`,"wide")+`<a class="button" href="#meal/${encodeURIComponent(date+"|"+id)}">Назад</a>`;
+ const input=$("#swap-search");if(input)input.oninput=()=>{const position=input.selectionStart;s.ui.swap={...(s.ui.swap||{}),context:arg,query:input.value};persist().catch(errorMessage);renderSwap(arg);$("#swap-search").focus();$("#swap-search").setSelectionRange(position,position);};
+}
 function hasFamiliarMenu(date) {
   const known = E.known(lib, s, date);
   return lib.foods.some((food) => known.has(food.id) && E.foodOK(lib, s, food.id, date));
@@ -600,7 +636,7 @@ async function renderToday(selected) {
       `${dateText(d)} · ${elapsed ? (s.profile.start_date_known ? "День прикорма " : "День дневника ") + elapsed : s.profile.started || s.profile.start_date_uncertain_legacy ? "Дата начала неизвестна" : "Первый день ещё не начат"}`,
       "Что сегодня на столе?",
     ) +
-    `<p>${esc(s.profile.name)} · ${E.months(s.profile.born, d)} мес.</p>${earlyStartNotice(d)}${suggestion ? `<div class="notice"><p>Следующий сценарий по готовности: ${esc(suggestion.text)}. Пюре можно сохранять. Текстура не меняется автоматически.</p><a class="button" href="#settings">Проверить освоенные навыки</a></div>` : ""}${nearing ? `<div class="notice">Пора согласовать следующий месяц. ${button("Посмотреть план", `nextperiod:${E.addDays(p.start, 30)}`)}</div>` : ""}${p?.anchor_pending ? "<p>Первое меню остаётся до фактического кормления. Согласование плана не запускает календарь.</p>" : ""}${p && !p.accepted && (p.ids.length || hasFamiliarMenu(d)) ? '<a class="button primary" href="#plan">Согласовать предварительный план</a>' : ""}${menu.length ? menu.map((m) => `<button class="card item" data-action="meal:${d}|${m.id}"><span><small>${esc(m.slot)} · ${{ done: "Сохранено", skipped: "Не пробовали", refused: "Отказался", pending: "Не отмечено" }[m.status]}</small>${cap(m.name)} ${m.newIDs.length ? "🆕" : ""}<small>${m.newIDs.map((id) => `${cap(idx.get(id).name)}: ${statusText(E.introduction(lib, s, id, d))}`).join(" · ")}${m.ingredients.some((id) => E.allergenGroups(idx.get(id)).length) ? " · ⚠️ Аллерген" : ""}</small></span><span>›</span></button>`).join("") : !p || (!p.ids.length && !hasFamiliarMenu(d)) ? `<div class="card"><h2>План пока не доступен</h2><p>${esc(E.reason(lib, s, d))}</p>${earlyStartNotice(d)}<a class="button" href="#preparation">Подготовка</a></div>` : p?.accepted ? `<p class="notice">${esc(E.reason(lib, s, d))}</p>` : ""}<p class="muted">${E.months(s.profile.born, d) >= 6 ? POLICY.water.text : "Вопрос воды при раннем старте согласуйте с врачом."} ${esc(POLICY.feeding_reminder)}</p>${E.reminders(
+    `<p>${esc(s.profile.name)} · ${E.months(s.profile.born, d)} мес.</p>${earlyStartNotice(d)}${nameIssueNotice()}${suggestion ? `<div class="notice"><p>Следующий сценарий по готовности: ${esc(suggestion.text)}. Пюре можно сохранять. Текстура не меняется автоматически.</p><a class="button" href="#settings">Проверить освоенные навыки</a></div>` : ""}${nearing ? `<div class="notice">Пора согласовать следующий месяц. ${button("Посмотреть план", `nextperiod:${E.addDays(p.start, 30)}`)}</div>` : ""}${p?.anchor_pending ? "<p>Первое меню остаётся до фактического кормления. Согласование плана не запускает календарь.</p>" : ""}${p && !p.accepted && (p.ids.length || hasFamiliarMenu(d)) ? '<a class="button primary" href="#plan">Согласовать предварительный план</a>' : ""}${menu.length ? menu.map((m) => `<button class="card item" data-action="meal:${d}|${m.id}"><span><small>${esc(m.slot)} · ${{ done: "Сохранено", skipped: "Не пробовали", refused: "Отказался", pending: "Не отмечено" }[m.status]}</small>${cap(m.name)} ${m.newIDs.length ? "🆕" : ""}<small>${m.newIDs.map((id) => `${cap(idx.get(id).name)}: ${statusText(E.introduction(lib, s, id, d))}`).join(" · ")}${m.ingredients.some((id) => E.allergenGroups(idx.get(id)).length) ? " · ⚠️ Аллерген" : ""}</small></span><span>›</span></button>`).join("") : !p || (!p.ids.length && !hasFamiliarMenu(d)) ? `<div class="card"><h2>План пока не доступен</h2><p>${esc(E.reason(lib, s, d))}</p><a class="button" href="#settings">Проверить профиль</a><a class="button" href="#preparation">Подготовка</a></div>` : p?.accepted ? `<p class="notice">${esc(E.reason(lib, s, d))}</p>` : ""}<p class="muted">${E.months(s.profile.born, d) >= 6 ? POLICY.water.text : "Вопрос воды при раннем старте согласуйте с врачом."} ${esc(POLICY.feeding_reminder)}</p>${E.reminders(
       s,
       menu,
       d,
@@ -669,10 +705,10 @@ async function renderPlan(selected) {
   const k = E.known(lib, s, date),
     ids = (p?.ids || []).filter((id) => !k.has(id));
   app.innerHTML =
-    title("План на 30 дней", "Ваш ближайший месяц") +
+    title("План на 30 дней", "Ваш ближайший месяц") + nameIssueNotice() +
     (p && (ids.length || hasFamiliarMenu(date))
       ? `${earlyStartNotice(date)}<p>${p.anchor_pending ? "Первый месяц: календарь начнётся после первого кормления" : dateText(p.start) + " — " + dateText(E.addDays(p.start, 29))}</p><p>Список рассчитан по прогнозу фактических трёхдневных циклов на 30 дней. Пропуски и реакции изменят прогноз. Согласуйте только новые продукты. Очередь — приоритет, а не обязательное число продуктов в неделю. Блюда подбираются автоматически; незавершённые знакомства переносятся.</p>${!p.accepted && p.legacy_plans?.length ? "<p class=\"notice\">Старый список пересчитан по вместимости календаря. Дневник и завершённые кормления сохранены; согласуйте исправленный план.</p>" : ""}${ids.length ? grouped(ids) : "<p>Новых продуктов нет. Продолжим меню из знакомых продуктов.</p>"}<div class="row">${button(p.accepted ? "✓ План принят" : "Согласовать план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить продукты", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>`
-      : `<p>${esc(E.reason(lib, s, date))}</p>${earlyStartNotice(date)}<a class="button" href="#preparation">Подготовка</a>`);
+      : `<p>${esc(E.reason(lib, s, date))}</p>${earlyStartNotice(date)}<a class="button" href="#settings">Проверить профиль</a><a class="button" href="#preparation">Подготовка</a>`);
 }
 
 function renderEntry() {
@@ -695,8 +731,15 @@ function renderEntry() {
         ["Другое", "Другое"],
       ],
       d.reaction || "Нет реакции",
-    )}<label for="symptoms">Симптомы или комментарий (сохраним исходный текст)</label><textarea id="symptoms" name="symptoms" maxlength="5000">${esc(d.symptoms || "")}</textarea><label for="extra_comment">Дополнительный комментарий</label><textarea id="extra_comment" name="extra_comment" maxlength="5000">${esc(d.extra_comment || "")}</textarea><p class="muted">Неизвестные названия сохраняются без рекомендаций. При реакции возможные ингредиенты отправляются на проверку педиатру; приложение не определяет причину.</p>${d.planned ? `<fieldset><legend>Какие компоненты ребёнок действительно съел?</legend>${d.ids.map((id) => `<label><input type="checkbox" name="consumed" value="${id}" ${!d.consumed_ids || d.consumed_ids.includes(id) ? "checked" : ""}>${cap(idx.get(id).name)}</label>`).join("")}</fieldset>` : ""}<label for="suspected">При реакции подозреваемый ингредиент</label><select id="suspected" name="suspected"><option value="">Не знаю — учесть все ингредиенты</option>${(d.ids || []).map((id) => `<option value="${id}" ${d.suspected === id ? "selected" : ""}>${cap(idx.get(id).name)}</option>`).join("")}</select><label for="photo">Фото по желанию — только на устройстве</label><input id="photo" type="file" accept="image/jpeg,image/png,image/webp"><label><input type="checkbox" id="photo-consent">Разрешаю сохранить выбранное фото в дневнике</label>${d.photo ? "<p>Фото сохранено в черновике</p>" : ""}<button class="primary" type="submit">Сохранить запись</button><a class="button" href="#reactions">⚠️ Экстренная памятка</a></form>${home()}`;
+    )}<label for="symptoms">Симптомы или комментарий (сохраним исходный текст)</label><textarea id="symptoms" name="symptoms" maxlength="5000">${esc(d.symptoms || "")}</textarea><label for="extra_comment">Дополнительный комментарий</label><textarea id="extra_comment" name="extra_comment" maxlength="5000">${esc(d.extra_comment || "")}</textarea><p class="muted">Неизвестные названия сохраняются без рекомендаций. При реакции возможные ингредиенты отправляются на проверку педиатру; приложение не определяет причину.</p>${d.planned ? `<fieldset><legend>Какие компоненты ребёнок действительно съел?</legend>${d.ids.map((id) => `<label><input type="checkbox" name="consumed" value="${id}" ${!d.consumed_ids || d.consumed_ids.includes(id) ? "checked" : ""}>${cap(idx.get(id).name)}</label>`).join("")}</fieldset>` : ""}<label for="suspected">При реакции подозреваемый ингредиент</label><select id="suspected" name="suspected"><option value="">Не знаю — учесть все ингредиенты</option>${(d.ids || []).map((id) => `<option value="${id}" ${d.suspected === id ? "selected" : ""}>${cap(idx.get(id).name)}</option>`).join("")}</select><label for="photo">Фото по желанию — только на устройстве</label><input id="photo" type="file" accept="image/jpeg,image/png,image/webp"><label><input type="checkbox" id="photo-consent">Разрешаю сохранить выбранное фото в дневнике</label>${d.photo ? "<p>Фото сохранено в черновике</p>" : ""}<button class="primary" type="submit">Сохранить запись</button><a class="button" href="#reactions">⚠️ Экстренная памятка</a></form>${home()}<a class="button" href="#${esc(d.returnRoute || (d.mealID ? "meal/"+encodeURIComponent(d.day+"|"+d.mealID) : "diary"))}">Назад</a>`;
   const form = $("#entry");
+  function syncSuspects() {
+    if(!d.planned)d.ids=[...new Set(E.split(d.name).flatMap(name=>{const r=E.recognizeName(lib,name);return r.status==="resolved"?E.ingredients(lib,r.matches[0].id):[]}))];
+    const actual=d.planned?(d.consumed_ids||d.ids):d.ids,select=$("#suspected");
+    if(d.suspected&&!actual.includes(d.suspected))d.suspected="";
+    select.innerHTML='<option value="">Не знаю — учесть все ингредиенты</option>'+actual.map(id=>`<option value="${esc(id)}" ${d.suspected===id?"selected":""}>${cap(idx.get(id)?.name)}</option>`).join("");
+  }
+  syncSuspects();
   form.oninput = () => {
     const f = new FormData(form);
     Object.assign(d, {
@@ -710,6 +753,7 @@ function renderEntry() {
       consumed_ids: f.getAll("consumed"),
       suspected: f.get("suspected"),
     });
+    syncSuspects();
     $("#urgent").hidden = !E.emergency(d.symptoms);
     persist().catch(errorMessage);
   };
@@ -740,6 +784,7 @@ function renderEntry() {
         throw Error(
           "Если ребёнок не ел, отметьте «Не пробовали» или «Отказался» в меню дня",
         );
+      if(!d.planned&&!E.split(d.name).length)throw Error("Укажите, что ребёнок съел, или отметьте пропуск в меню дня.");
       const names = d.planned ? [d.name] : E.split(d.name),
         matches = names.map((n) => E.resolve(lib, n)),
         ids = [
@@ -805,8 +850,12 @@ function renderEntry() {
           ids: d.planned ? d.consumed_ids || d.ids : ids,
           suspected: d.suspected ? [d.suspected] : undefined,
           photo: d.photo || null,
+          unplanned: !d.planned,
           token: d.token,
         });
+      if(hasReaction && !d.planned) for(let n=0;n<matches.length;n++) if(matches[n].length!==1&&!E.isEmptyName(names[n])) {
+        s.unknown_reactions ||= [];s.unknown_reactions.push({term:names[n],rowID:d.editID||s.diary.at(-1)?.id});
+      }
       E.refreshPeriods(lib, s);
       s.draft = null;
       await persist();
@@ -967,7 +1016,10 @@ function renderSettings() {
       const imported = E.validateBackup(parsed, lib);
       if (!confirm("Заменить все локальные данные этой резервной копией?"))
         return;
+      imported._revision=s._revision||0;
+      E.upgradeNames(lib,imported);E.upgradePlanning(lib,imported);
       await save(db, imported);
+      savedSignature=JSON.stringify(imported);conflicted=false;
       s = imported;
       onboarding = s.draft?.type === "onboarding" ? s.draft.answers : null;
       step = s.draft?.step || 0;
@@ -1042,7 +1094,7 @@ function renderSettings() {
           allergen_doctor_confirmed: f.has("allergen_doctor_confirmed"),
           doctor_allergen_foods: resolved.map((r) => r[0].id),
         });
-        E.refreshPeriods(lib, s);
+        E.reconcileProfile(lib, s);
         delete s.ui.settingsDraft;
         await persist();
         announce("Настройки сохранены");
@@ -1059,7 +1111,7 @@ function renderEditPlan() {
   const p = s.periods.find((p) => p.start === d.start);
   app.innerHTML =
     title("Изменения без спешки", "Замена позиций") +
-    `<p>Исходный список целиком:</p>${grouped(p.ids)}<form id="replace">${field("Что заменить (названия через запятую)", "old", d.old || "", "text", 'required maxlength="10000"')}${field("На что заменить (в том же порядке; пусто — подобрать)", "targets", d.targets || "", "text", 'maxlength="10000"')}<button class="primary">Подготовить замены</button></form>${d.proposals ? `<div class="card"><h2>Проверьте изменения</h2>${d.proposals.map(([a, b]) => `<p>${esc(idx.get(a)?.name)} → ${esc(idx.get(b)?.name)}</p>`).join("")}${button("Подтвердить все замены", "confirmreplace", "primary")}${button("Другие варианты", "replacementOptions")}</div>` : ""}<a class="button" href="#library">Посмотреть варианты из базы</a>${home()}`;
+    `<p>Исходный список целиком:</p>${grouped(p.ids)}<form id="replace">${field("Что заменить (названия через запятую)", "old", d.old || "", "text", 'required maxlength="10000"')}${field("На что заменить (в том же порядке; пусто — подобрать)", "targets", d.targets || "", "text", 'maxlength="10000"')}<button class="primary">Подготовить замены</button></form>${d.proposals ? `<div class="card"><h2>Проверьте изменения</h2>${d.proposals.map(([a, b]) => `<p>${esc(idx.get(a)?.name)} → ${esc(idx.get(b)?.name)}</p>`).join("")}${button("Подтвердить все замены", "confirmreplace", "primary")}${button("Другие варианты", "replacementOptions")}</div>` : ""}<a class="button" href="#library">Посмотреть варианты из базы</a><a class="button" href="#plan/${p.start}">Назад</a>${home()}`;
   $("#replace").oninput = (e) => {
     const f = new FormData(e.currentTarget);
     d.old = f.get("old");
@@ -1100,7 +1152,6 @@ function renderEditPlan() {
         if (
           !b ||
           b.category !== a.category ||
-          E.stage(b) > E.months(s.profile.born, d.start) + 1 ||
           !E.foodOK(lib, s, b.id, d.start, true, true)
         )
           throw Error(
@@ -1137,9 +1188,8 @@ function renderShopping() {
   for (const projected of E.forecastMenus(lib, s, from, days)) {
     for (const meal of projected.meals.filter((m) => m.status === "pending")) {
       const item = meal.snapshot;
-      for (const ingredient of item.ingredients || [
-        { food_id: item.id, amount: null, unit: "" },
-      ]) {
+      const listed=item.ingredients||[],covered=new Set(listed.map(i=>i.food_id));
+      for (const ingredient of [...listed,...meal.ingredients.filter(id=>!covered.has(id)).map(id=>({food_id:id,amount:null,unit:""}))]) {
         const f = idx.get(ingredient.food_id);
         if (!f) continue;
         const key = f.id + "|" + ingredient.unit;
@@ -1243,6 +1293,8 @@ app.addEventListener("click", (e) => {
       return;
     }
     if (["ate", "other", "reaction"].includes(action)) {
+      const [requestedDay,requestedID]=value.split("|");
+      if(["ate","other"].includes(action)&&s.draft?.type==="entry"&&s.draft.day===requestedDay&&s.draft.mealID===requestedID&&s.draft.planned===(action!=="other")){go("entry");return;}
       if (
         s.draft?.type === "entry" &&
         !confirm("Заменить незавершённую запись новой?")
@@ -1255,6 +1307,7 @@ app.addEventListener("click", (e) => {
         day: d,
         mealID: id,
         planned: action !== "other",
+        returnRoute: location.hash.slice(1),
         name: action !== "other" ? m.name : "",
         ids: m.ingredients,
         form: "-",
@@ -1266,39 +1319,34 @@ app.addEventListener("click", (e) => {
       go("entry");
       return;
     }
-    if (action === "dish") {
-      const [d, id] = value.split("|"),
-        m = s.menus[d].find((m) => m.id === id),
-        known = E.known(lib, s, d);
-      const candidates = [...lib.recipes, ...lib.foods].filter(
-        (i) =>
-          i.id !== m.key &&
-          E.eligible(lib, s, i, d, true) &&
-          E.ingredients(lib, i.id).every(
-            (k) => known.has(k) || m.newIDs.includes(k),
-          ) &&
-          m.newIDs.every((k) => E.ingredients(lib, i.id).includes(k)),
-      );
-      app.innerHTML =
-        title("Замена блюда", "Выберите безопасный вариант") +
-        (candidates.length
-          ? candidates
-              .map((i) =>
-                button(cap(i.name), `chooseDish:${d}|${id}|${i.id}`, "wide"),
-              )
-              .join("")
-          : "<p>Безопасной замены с сохранением знакомства нет. Можно отметить отказ или пропуск.</p>") +
-        `<a class="button" href="#meal/${encodeURIComponent(d + "|" + id)}">Назад</a>`;
-      return;
+    if (action === "dish") { go("swap/"+encodeURIComponent(value)); return; }
+    if (action === "swapClear") {if(s.ui.swap)s.ui.swap.query="";await persist();renderSwap(location.hash.split("/")[1]);return;}
+    if (action === "swapMode") { s.ui.swap={context:location.hash.split("/")[1],mode:value,query:s.ui.swap?.query||""};await persist();renderSwap(s.ui.swap.context);return; }
+    if (action === "swapPick") {
+      const [date,id,mode,key]=value.split("|");s.ui.swap={context:encodeURIComponent(date+"|"+id),mode,key,confirm:true};await persist();renderSwap(s.ui.swap.context);return;
     }
-    if (action === "chooseDish") {
-      const [d, id, key] = value.split("|");
-      E.replaceDish(lib, s, d, id, key);
-      await persist();
-      announce("Блюдо заменено; история сохранена");
-      go("today/" + d);
-      return;
+    if (action === "swapConfirm") {
+      const draft=s.ui.swap;if(!draft?.confirm)throw Error("Выберите замену и подтвердите её.");const [date,id]=decodeURIComponent(draft.context).split("|");E.changeMeal(lib,s,date,id,draft.mode,draft.key);delete s.ui.swap;await persist();announce("Замена сохранена. Дневник не изменён.");go("today/"+date);return;
     }
+    if (action === "fixName") {
+      const [field,index,key]=value.split("|");s.ui.nameFix={field,index:Number(index),key,raw:field==="unknown_reactions"?s.unknown_reactions[Number(index)].term:s.profile[field][Number(index)]};await persist();renderClarify();return;
+    }
+    if (action === "confirmName") {
+      const d=s.ui.nameFix;
+      if(d?.field==="unknown_reactions"){
+        const row=s.unknown_reactions?.[d.index];if(!row||row.term!==d.raw||!lib.foods.some(f=>f.id===d.key))throw Error("Выберите продукт ещё раз.");
+        row.resolvedID=d.key;s.decisions[d.key]="pending";const entry=s.diary.find(r=>r.id===row.rowID);if(entry)entry.clarified_ingredients=[...(entry.clarified_ingredients||[]),d.key];
+        s.changes.push({action:"clarify_reaction",term:d.raw,id:d.key,at:new Date().toISOString()});delete s.ui.nameFix;E.reconcileProfile(lib,s);await persist();go(s.ui.clarifyReturn||"today");return;
+      }
+      if(!d||!["excluded_names","unavailable_foods","introduced_names"].includes(d.field)||!Number.isInteger(d.index)||d.index<0||!Array.isArray(s.profile[d.field])||!lib.foods.some(f=>f.id===d.key))throw Error("Выберите продукт из библиотеки ещё раз.");if(s.profile[d.field]?.[d.index]!==d.raw)throw Error("Список изменился. Выберите продукт ещё раз.");
+      const before=[...s.profile[d.field]];s.profile[d.field][d.index]=idx.get(d.key).name;
+      for(const unresolved of s.unknown_reactions||[])if(unresolved.term===d.raw&&!unresolved.resolvedID){
+        s.decisions[d.key]="pending";unresolved.resolvedID=d.key;const row=s.diary.find(r=>r.id===unresolved.rowID);if(row)row.clarified_ingredients=[...(row.clarified_ingredients||[]),d.key];
+        if(unresolved.auto_exclusion&&d.field==="excluded_names")s.profile[d.field].splice(d.index,1);
+      }
+      s.changes.push({action:"clarify_name",field:d.field,before,after:[...s.profile[d.field]],at:new Date().toISOString()});delete s.ui.nameFix;E.reconcileProfile(lib,s);await persist();go(s.ui.clarifyReturn||"plan");return;
+    }
+    if (action === "reloadState") {conflicted=false;s=await load(db);savedSignature=JSON.stringify(s);onboarding=s.draft?.type==="onboarding"?s.draft.answers:null;step=s.draft?.step||0;await render();return;}
     if (action === "skip" || action === "refuse") {
       const [d, id] = value.split("|");
       E.record(lib, s, {
@@ -1485,7 +1533,7 @@ app.addEventListener("click", (e) => {
         )
       )
         return;
-      await clear(db);
+      await clear(db,s._revision||0);
       s = E.emptyState();
       onboarding = null;
       noticeSeen = false;
