@@ -1,7 +1,7 @@
 import { POLICY } from "./policy.js";
 import { RULES, TUNING } from "./rules.js";
 // Browser port of bot/prikorm/meal_service.py. No Telegram, network or storage calls.
-export const PLANNER_VERSION = "cycles-2026-11-27.2";
+export const PLANNER_VERSION = "cycles-2026-11-28.1";
 // Disposable projections never migrate plans or recursively build more projections.
 const projections = new WeakSet();
 const previews = new WeakMap();
@@ -293,7 +293,7 @@ export function confirmEarlyStart(lib, s, answer, date = today(s.profile?.zone))
   s.profile.early_doctor_confirmed = answer;
   if (s.ui.settingsDraft) s.ui.settingsDraft.early = answer ? "yes" : "no";
   s.changes.push({ action: "early_start_answer", answer, at: new Date().toISOString() });
-  if (answer) {
+  if (answer || !POLICY.readiness.early_requires_doctor) {
     // A formerly blocked/empty plan must be offered for agreement, not remain accepted and empty.
     for (const p of s.periods)
       if ((p.anchor_pending || addDays(p.start, 30) > date) && !p.ids.length) p.accepted = false;
@@ -314,7 +314,7 @@ export function ready(p, day) {
       p.ready &&
       age >= POLICY.readiness.minimum_months &&
       age <= POLICY.readiness.maximum_months &&
-      (age >= POLICY.readiness.standard_months || p.early_doctor_confirmed === true),
+      (!POLICY.readiness.early_requires_doctor || age >= POLICY.readiness.standard_months || p.early_doctor_confirmed === true),
   );
 }
 export function reason(lib, s, day) {
@@ -327,14 +327,14 @@ export function reason(lib, s, day) {
   if (age > 24) return "Эта библиотека рассчитана на возраст до 24 месяцев.";
   if (!p.ready)
     return "Готовность пока не подтверждена. Обсудите начало с педиатром.";
-  if (age < 6 && !p.early_doctor_confirmed)
+  if (POLICY.readiness.early_requires_doctor && age < 6 && !p.early_doctor_confirmed)
     return "В 4–5 месяцев нужно подтвердить согласование раннего начала с педиатром.";
   if (blocked(lib, s).has("__unresolved__"))
     return "Уточните названия исключений в профиле: автоматическое меню приостановлено.";
   if (p.risk === "unknown" || p.risk == null)
-    return "В анкете не уточнены медицинские ограничения. Укажите ответ в настройках профиля; согласование раннего старта сохраняется отдельно.";
+    return "В анкете не уточнены медицинские ограничения. Укажите ответ в настройках профиля.";
   if (p.risk === "yes")
-    return "В профиле указаны медицинские ограничения. Универсальный план новых продуктов не формируется; согласование раннего старта их не отменяет.";
+    return "В профиле указаны медицинские ограничения. Универсальный план новых продуктов не формируется; рекомендация о раннем старте их не отменяет.";
   return "С учётом ограничений безопасных вариантов пока нет. Нужна консультация педиатра; ограничения не отключаются.";
 }
 export function foodOK(
@@ -359,8 +359,10 @@ export function foodOK(
     n = norm(f.name),
     early =
       age < POLICY.readiness.standard_months &&
-      POLICY.early_priority.some((name) => norm(name) === n) &&
-      f.early_medical_allowed;
+      age >= POLICY.early_age.minimum_months &&
+      f[POLICY.early_age.source_permission_field] === true &&
+      f.min_age != null &&
+      (age >= f.min_age || f.min_age === POLICY.early_age.overridable_source_minimum);
   if (age < POLICY.readiness.standard_months && !early) return false;
   const dairy =
     ingredient &&
@@ -495,10 +497,6 @@ export function priorityFoodIds(lib, s, day) {
   const age = months(s.profile.born, day),
     k = known(lib, s, day),
     result = [];
-  if (age < POLICY.readiness.standard_months)
-    return POLICY.early_priority
-      .map((n) => lib.foods.find((f) => norm(f.name) === norm(n))?.id)
-      .filter(Boolean);
   for (const group of POLICY.priority_groups)
     for (const item of group.items) {
       const candidates = item.names
@@ -515,14 +513,8 @@ export function priorityFoodIds(lib, s, day) {
   return result;
 }
 export function planFoodOK(lib, s, key, day, ingredient = false) {
-  const f = lib.foods.find((f) => f.id === key);
-  return (
-    !!f &&
-    foodOK(lib, s, key, day, ingredient) &&
-    (known(lib, s, day).has(key) ||
-      stage(f) <=
-        months(s.profile.born, day) + POLICY.matrix_planning.prospective_months)
-  );
+  // Stage is an ordering hint; actual food permission is checked on each feeding date.
+  return foodOK(lib, s, key, day, ingredient);
 }
 export function rankFoods(lib, s, foods, day) {
   const priority = priorityFoodIds(lib, s, day),
@@ -752,7 +744,7 @@ function ensurePeriod(lib, s, period, from) {
     ...(before.initial_ids || before.ids).filter((id) => known(lib, s, from).has(id)),
     ...period.ids,
   ])];
-  period.accepted = false;
+  period.accepted = before.accepted && JSON.stringify(before.ids) === JSON.stringify(period.ids);
   period.revision = (period.revision || 0) + 1;
   s.changes.push({ action: "migrate_cycle_plan", at: new Date().toISOString(),
     start: period.start, before: before.ids, after: [...period.ids] });
@@ -1304,7 +1296,6 @@ export function replacementCandidates(lib, s, old, day) {
       (f) =>
         f.id !== old.id &&
         f.category === old.category &&
-        stage(f) <= age + 1 &&
         foodOK(lib, s, f.id, day, true, true),
     )
     .sort(

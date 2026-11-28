@@ -268,20 +268,9 @@ function renderQuestion() {
         "<p>Удержание головы, вертикальное положение с необходимой поддержкой, координация рук, глаз и рта, проглатывание пищи. Самостоятельное сидение не обязательно. Обсудите готовность с педиатром.</p>",
     ],
   ];
-  if (E.months(a.born, day()) >= 4 && E.months(a.born, day()) < 6)
-    qs.push([
-      "early",
-      "Раннее начало",
-      select(
-        "Вы согласовали начало прикорма с педиатром?",
-        "early",
-        [
-          ["no", "Нет"],
-          ["yes", "Да"],
-        ],
-        a.early_doctor_confirmed ? "yes" : "no",
-      ) + "<p>Стандартный возраст начала — около 6 месяцев.</p>",
-    ]);
+  if (E.earlyStartRequired(a, day())) qs.push([
+    "early_info", "Раннее начало", `<p class="notice">${esc(POLICY.readiness.early_advice)}</p><p>Ознакомительный приём и индивидуальный темп. Подтверждение консультации не требуется.</p>`
+  ]);
   qs.push([
     "started",
     "Уже начали прикорм?",
@@ -416,7 +405,6 @@ function renderQuestion() {
       a.ready = f.get("ready") === "yes";
       a.readiness_answer = a.ready ? "yes" : "no";
     }
-    if (key === "early") a.early_doctor_confirmed = f.get("early") === "yes";
     if (key === "started") {
       a.started = f.get("started") === "yes";
       if (!a.started) {
@@ -484,8 +472,7 @@ function renderQuestion() {
         }
         s.draft = null;
         onboarding = null;
-        if (E.earlyStartRequired(s.profile, day())) E.confirmEarlyStart(lib, s, s.profile.early_doctor_confirmed === true, day());
-        else E.createPeriod(lib, s);
+        E.createPeriod(lib, s);
         await persist();
         go(E.months(s.profile.born, day()) < 4 ? "preparation" : "plan");
         return;
@@ -499,7 +486,7 @@ function renderQuestion() {
 }
 
 function summary(a) {
-  return `<div class="card"><h2>${esc(a.name)}</h2><p>Дата рождения: ${dateText(a.born)}<br>Готовность: ${a.ready ? "Да" : "Нет"}<br>${E.earlyStartRequired(a, day()) ? `Начало согласовано с педиатром: ${a.early_doctor_confirmed === true ? "Да" : "Нет"}<br>` : ""}Прикорм начат: ${a.started ? "Да" : "Нет"}<br>Дата начала: ${dateText(a.feeding_started_on || a.feeding_start_date)}<br>Ввели: ${esc(a.introduced_names.join(", ") || "—")}<br>Ограничения: ${a.risk === "yes" ? "Да" : a.risk === "no" ? "Нет" : "Нужно уточнить"}<br>Исключения: ${esc(a.excluded_names.join(", ") || "—")}<br>Напоминания в приложении: ${a.notifications_requested ? esc(a.time) : "Нет"}</p></div>`;
+  return `<div class="card"><h2>${esc(a.name)}</h2><p>Дата рождения: ${dateText(a.born)}<br>Готовность: ${a.ready ? "Да" : "Нет"}<br>Прикорм начат: ${a.started ? "Да" : "Нет"}<br>Дата начала: ${dateText(a.feeding_started_on || a.feeding_start_date)}<br>Ввели: ${esc(a.introduced_names.join(", ") || "—")}<br>Ограничения: ${a.risk === "yes" ? "Да" : a.risk === "no" ? "Нет" : "Нужно уточнить"}<br>Исключения: ${esc(a.excluded_names.join(", ") || "—")}<br>Напоминания в приложении: ${a.notifications_requested ? esc(a.time) : "Нет"}</p></div>`;
 }
 function renderLibrary() {
   let list = kind === "food" ? lib.foods : lib.recipes;
@@ -566,7 +553,7 @@ function details(item) {
     : [E.allergenGroups(item).join(", ") || "не указана"];
   return (
     note() +
-    `<div class="card"><p class="eyebrow">${esc(item.category)} · Черновой материал</p><h2>${cap(item.name)}</h2><p>Возрастной ориентир: ${item.min_age ?? "не указан"} мес. Это не обязательная дата введения.</p>${ingredients ? `<h3>Ингредиенты для приготовления</h3><p style="white-space:pre-line">${esc(ingredients)}</p><p class="muted">Закладка для приготовления, не норма съедания.</p>` : ""}<h3>Приготовление и подача</h3><p>${esc(item.how || displayForm || "Не указаны в источнике")}</p>${item.how ? `<p>${esc(item.form)}</p>` : ""}<h3>Условия и безопасность</h3>${specificSafety(item)}<p>${esc(item.condition || "Условия определяются ингредиентами и навыками.")}</p><p>${esc(item.safety || "См. ограничения ингредиентов. Дополнительные сведения не указаны.")}</p><p>Аллергенность: ${esc([...new Set(allergies)].join(", "))}. Неизвестная маркировка не означает отсутствие аллергена.</p>${item.ingredients ? `<p>Хранение: ${esc(item.storage || "не указано")}. Повторный разогрев: ${esc(item.reheat || "не указано")}.</p>` : ""}<p class="muted">Источники: ${esc(item.sources || "не указаны")}</p>${
+    `<div class="card"><p class="eyebrow">${esc(item.category)} · Черновой материал</p><h2>${cap(item.name)}</h2><p>Возрастной ориентир: ${item.min_age ?? "не указан"} мес. Это не обязательная дата введения.</p>${ingredients ? `<h3>Ингредиенты для приготовления</h3><p style="white-space:pre-line">${esc(ingredients)}</p><p class="muted">Закладка для приготовления, не норма съедания.</p>` : ""}<h3>Приготовление и подача</h3><p>${esc(item.how || displayForm || "Не указаны в источнике")}</p>${item.how ? `<p>${esc(item.form)}</p>` : ""}<h3>Условия и безопасность</h3>${specificSafety(item)}<p>${esc((item.condition || "Условия определяются ингредиентами и навыками.").replace("при старте 4–5 мес только по индивидуальному решению врача", "при старте 4–5 мес — при готовности и по решению мамы; рекомендуется обсудить с педиатром"))}</p><p>${esc(item.safety || "См. ограничения ингредиентов. Дополнительные сведения не указаны.")}</p><p>Аллергенность: ${esc([...new Set(allergies)].join(", "))}. Неизвестная маркировка не означает отсутствие аллергена.</p>${item.ingredients ? `<p>Хранение: ${esc(item.storage || "не указано")}. Повторный разогрев: ${esc(item.reheat || "не указано")}.</p>` : ""}<p class="muted">Источники: ${esc(item.sources || "не указаны")}</p>${
       item.ingredients
         ? `<details><summary>Ограничения ингредиентов</summary>${item.ingredients
             .map((i) => {
@@ -597,23 +584,8 @@ function hasFamiliarMenu(date) {
   const known = E.known(lib, s, date);
   return lib.foods.some((food) => known.has(food.id) && E.foodOK(lib, s, food.id, date));
 }
-function earlyStartForm(date) {
-  if (!E.earlyStartRequired(s.profile, date) || s.profile.early_doctor_confirmed === true) return "";
-  return `<form id="early-confirmation" class="card">${select("Вы согласовали начало прикорма с педиатром?", "early", [["no", "Нет"], ["yes", "Да"]], "no")}<p>Стандартное начало — около 6 месяцев. Для раннего старта необходимы готовность ребёнка и согласование педиатра.</p><button class="primary" type="submit">Сохранить ответ</button></form>`;
-}
-function bindEarlyStartForm() {
-  const form = $("#early-confirmation");
-  if (!form) return;
-  form.onsubmit = (event) => {
-    event.preventDefault();
-    run(async () => {
-      const answer = new FormData(form).get("early") === "yes";
-      E.confirmEarlyStart(lib, s, answer, day());
-      await persist();
-      announce(answer ? "Согласование сохранено" : "Ответ сохранён. План раннего старта пока недоступен.");
-      await render();
-    });
-  };
+function earlyStartNotice(date) {
+  return E.earlyStartRequired(s.profile, date) ? `<p class="notice">${esc(POLICY.readiness.early_advice)}</p>` : "";
 }
 async function renderToday(selected) {
   const d = E.validDate(selected) ? selected : day(),
@@ -628,7 +600,7 @@ async function renderToday(selected) {
       `${dateText(d)} · ${elapsed ? (s.profile.start_date_known ? "День прикорма " : "День дневника ") + elapsed : s.profile.started || s.profile.start_date_uncertain_legacy ? "Дата начала неизвестна" : "Первый день ещё не начат"}`,
       "Что сегодня на столе?",
     ) +
-    `<p>${esc(s.profile.name)} · ${E.months(s.profile.born, d)} мес.</p>${suggestion ? `<div class="notice"><p>Следующий сценарий по готовности: ${esc(suggestion.text)}. Пюре можно сохранять. Текстура не меняется автоматически.</p><a class="button" href="#settings">Проверить освоенные навыки</a></div>` : ""}${nearing ? `<div class="notice">Пора согласовать следующий месяц. ${button("Посмотреть план", `nextperiod:${E.addDays(p.start, 30)}`)}</div>` : ""}${p?.anchor_pending ? "<p>Первое меню остаётся до фактического кормления. Согласование плана не запускает календарь.</p>" : ""}${p && !p.accepted && (p.ids.length || hasFamiliarMenu(d)) ? '<a class="button primary" href="#plan">Согласовать предварительный план</a>' : ""}${menu.length ? menu.map((m) => `<button class="card item" data-action="meal:${d}|${m.id}"><span><small>${esc(m.slot)} · ${{ done: "Сохранено", skipped: "Не пробовали", refused: "Отказался", pending: "Не отмечено" }[m.status]}</small>${cap(m.name)} ${m.newIDs.length ? "🆕" : ""}<small>${m.newIDs.map((id) => `${cap(idx.get(id).name)}: ${statusText(E.introduction(lib, s, id, d))}`).join(" · ")}${m.ingredients.some((id) => E.allergenGroups(idx.get(id)).length) ? " · ⚠️ Аллерген" : ""}</small></span><span>›</span></button>`).join("") : !p || (!p.ids.length && !hasFamiliarMenu(d)) ? `<div class="card"><h2>План пока не доступен</h2><p>${esc(E.reason(lib, s, d))}</p>${earlyStartForm(d)}<a class="button" href="#preparation">Подготовка</a></div>` : p?.accepted ? `<p class="notice">${esc(E.reason(lib, s, d))}</p>` : ""}<p class="muted">${E.months(s.profile.born, d) >= 6 ? POLICY.water.text : "Вопрос воды при раннем старте согласуйте с врачом."} ${esc(POLICY.feeding_reminder)}</p>${E.reminders(
+    `<p>${esc(s.profile.name)} · ${E.months(s.profile.born, d)} мес.</p>${earlyStartNotice(d)}${suggestion ? `<div class="notice"><p>Следующий сценарий по готовности: ${esc(suggestion.text)}. Пюре можно сохранять. Текстура не меняется автоматически.</p><a class="button" href="#settings">Проверить освоенные навыки</a></div>` : ""}${nearing ? `<div class="notice">Пора согласовать следующий месяц. ${button("Посмотреть план", `nextperiod:${E.addDays(p.start, 30)}`)}</div>` : ""}${p?.anchor_pending ? "<p>Первое меню остаётся до фактического кормления. Согласование плана не запускает календарь.</p>" : ""}${p && !p.accepted && (p.ids.length || hasFamiliarMenu(d)) ? '<a class="button primary" href="#plan">Согласовать предварительный план</a>' : ""}${menu.length ? menu.map((m) => `<button class="card item" data-action="meal:${d}|${m.id}"><span><small>${esc(m.slot)} · ${{ done: "Сохранено", skipped: "Не пробовали", refused: "Отказался", pending: "Не отмечено" }[m.status]}</small>${cap(m.name)} ${m.newIDs.length ? "🆕" : ""}<small>${m.newIDs.map((id) => `${cap(idx.get(id).name)}: ${statusText(E.introduction(lib, s, id, d))}`).join(" · ")}${m.ingredients.some((id) => E.allergenGroups(idx.get(id)).length) ? " · ⚠️ Аллерген" : ""}</small></span><span>›</span></button>`).join("") : !p || (!p.ids.length && !hasFamiliarMenu(d)) ? `<div class="card"><h2>План пока не доступен</h2><p>${esc(E.reason(lib, s, d))}</p>${earlyStartNotice(d)}<a class="button" href="#preparation">Подготовка</a></div>` : p?.accepted ? `<p class="notice">${esc(E.reason(lib, s, d))}</p>` : ""}<p class="muted">${E.months(s.profile.born, d) >= 6 ? POLICY.water.text : "Вопрос воды при раннем старте согласуйте с врачом."} ${esc(POLICY.feeding_reminder)}</p>${E.reminders(
       s,
       menu,
       d,
@@ -640,7 +612,6 @@ async function renderToday(selected) {
       .join(
         "",
       )}<div class="row">${button("← День раньше", `day:${E.addDays(d, -1)}`)}${button("День вперёд →", `day:${E.addDays(d, 1)}`)}</div>`;
-  bindEarlyStartForm();
 }
 
 function portionBlock(date, meal) {
@@ -700,9 +671,8 @@ async function renderPlan(selected) {
   app.innerHTML =
     title("План на 30 дней", "Ваш ближайший месяц") +
     (p && (ids.length || hasFamiliarMenu(date))
-      ? `<p>${p.anchor_pending ? "Первый месяц: календарь начнётся после первого кормления" : dateText(p.start) + " — " + dateText(E.addDays(p.start, 29))}</p><p>Список рассчитан по прогнозу фактических трёхдневных циклов на 30 дней. Пропуски и реакции изменят прогноз. Согласуйте только новые продукты. Очередь — приоритет, а не обязательное число продуктов в неделю. Блюда подбираются автоматически; незавершённые знакомства переносятся.</p>${!p.accepted && p.legacy_plans?.length ? "<p class=\"notice\">Старый список пересчитан по вместимости календаря. Дневник и завершённые кормления сохранены; согласуйте исправленный план.</p>" : ""}${ids.length ? grouped(ids) : "<p>Новых продуктов нет. Продолжим меню из знакомых продуктов.</p>"}<div class="row">${button(p.accepted ? "✓ План принят" : "Согласовать план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить продукты", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>`
-      : `<p>${esc(E.reason(lib, s, date))}</p>${earlyStartForm(date)}<a class="button" href="#preparation">Подготовка</a>`);
-  bindEarlyStartForm();
+      ? `${earlyStartNotice(date)}<p>${p.anchor_pending ? "Первый месяц: календарь начнётся после первого кормления" : dateText(p.start) + " — " + dateText(E.addDays(p.start, 29))}</p><p>Список рассчитан по прогнозу фактических трёхдневных циклов на 30 дней. Пропуски и реакции изменят прогноз. Согласуйте только новые продукты. Очередь — приоритет, а не обязательное число продуктов в неделю. Блюда подбираются автоматически; незавершённые знакомства переносятся.</p>${!p.accepted && p.legacy_plans?.length ? "<p class=\"notice\">Старый список пересчитан по вместимости календаря. Дневник и завершённые кормления сохранены; согласуйте исправленный план.</p>" : ""}${ids.length ? grouped(ids) : "<p>Новых продуктов нет. Продолжим меню из знакомых продуктов.</p>"}<div class="row">${button(p.accepted ? "✓ План принят" : "Согласовать план", `accept:${p.start}`, "primary")}${button(s.draft?.type === "replace" ? "Продолжить замены" : "Заменить продукты", `edit:${p.start}`)}</div><a class="button" href="#shopping/${p.start}">🛒 Список покупок</a>`
+      : `<p>${esc(E.reason(lib, s, date))}</p>${earlyStartNotice(date)}<a class="button" href="#preparation">Подготовка</a>`);
 }
 
 function renderEntry() {
@@ -970,7 +940,7 @@ function renderSettings() {
             ["yes", "Включены"],
           ],
           s.profile.notifications_requested ? "yes" : "no",
-        )}${field("Утреннее напоминание внутри приложения", "time", s.profile.time || "09:00", "time")}${field("Вечернее напоминание внутри приложения", "evening_time", s.profile.evening_time || "19:00", "time")}<p class="notice">При закрытом приложении уведомления не отправляются. Здесь нет фоновой рассылки. Вечерняя проверка неотмеченных приёмов видна при открытии «Сегодня».</p><details><summary>Согласование раннего старта</summary>${select("Вы согласовали начало прикорма с педиатром?", "early", [["no", "Нет"], ["yes", "Да"]], s.profile.early_doctor_confirmed === true ? "yes" : "no")}<p class="muted">Не стандартная схема. Возрастные условия, готовность, исключения и реакции сохраняются.</p></details><details><summary>Аллергены и согласование врача</summary><label><input name="severe_eczema" type="checkbox" ${s.profile.severe_eczema ? "checked" : ""}>Тяжёлая экзема</label><label><input name="known_food_allergy" type="checkbox" ${s.profile.known_food_allergy ? "checked" : ""}>Известная пищевая аллергия</label><label><input name="allergen_doctor_confirmed" type="checkbox" ${s.profile.allergen_doctor_confirmed ? "checked" : ""}>Введение указанных аллергенов согласовано с врачом</label>${field("Какие продукты с аллергенами согласованы (через запятую)", "doctor_allergens", (s.profile.doctor_allergen_foods || []).map((id) => idx.get(id)?.name).join(", "), "text", 'maxlength="5000"')}<p>Это не отменяет зарегистрированную реакцию или исключение: их возвращение подтверждается в разделе проверки врача.</p></details><label><input name="skills_confirmed" type="checkbox" ${s.profile.skills_confirmed ? "checked" : ""}>Подтверждаю навыки выбранной текстуры</label>${select(
+        )}${field("Утреннее напоминание внутри приложения", "time", s.profile.time || "09:00", "time")}${field("Вечернее напоминание внутри приложения", "evening_time", s.profile.evening_time || "19:00", "time")}<p class="notice">При закрытом приложении уведомления не отправляются. Здесь нет фоновой рассылки. Вечерняя проверка неотмеченных приёмов видна при открытии «Сегодня».</p><details><summary>Ранний старт: информация</summary><p>${esc(POLICY.readiness.early_advice)}</p><p class="muted">Не стандартная схема. Возрастные условия, готовность, исключения и реакции сохраняются.</p></details><details><summary>Аллергены и согласование врача</summary><label><input name="severe_eczema" type="checkbox" ${s.profile.severe_eczema ? "checked" : ""}>Тяжёлая экзема</label><label><input name="known_food_allergy" type="checkbox" ${s.profile.known_food_allergy ? "checked" : ""}>Известная пищевая аллергия</label><label><input name="allergen_doctor_confirmed" type="checkbox" ${s.profile.allergen_doctor_confirmed ? "checked" : ""}>Введение указанных аллергенов согласовано с врачом</label>${field("Какие продукты с аллергенами согласованы (через запятую)", "doctor_allergens", (s.profile.doctor_allergen_foods || []).map((id) => idx.get(id)?.name).join(", "), "text", 'maxlength="5000"')}<p>Это не отменяет зарегистрированную реакцию или исключение: их возвращение подтверждается в разделе проверки врача.</p></details><label><input name="skills_confirmed" type="checkbox" ${s.profile.skills_confirmed ? "checked" : ""}>Подтверждаю навыки выбранной текстуры</label>${select(
           "Режим знакомства",
           "introduction_mode",
           [
@@ -1063,7 +1033,7 @@ function renderSettings() {
           notifications_requested: f.get("notifications") === "yes",
           time: f.get("time"),
           evening_time: f.get("evening_time"),
-          early_doctor_confirmed: f.get("early") === "yes",
+          early_doctor_confirmed: s.profile.early_doctor_confirmed,
           doctor_consultation_date: s.profile.doctor_consultation_date || null,
           doctor_plan_note: s.profile.doctor_plan_note || null,
           doctor_foods: s.profile.doctor_foods || [],
@@ -1072,8 +1042,7 @@ function renderSettings() {
           allergen_doctor_confirmed: f.has("allergen_doctor_confirmed"),
           doctor_allergen_foods: resolved.map((r) => r[0].id),
         });
-        if (E.earlyStartRequired(p, day())) E.confirmEarlyStart(lib, s, p.early_doctor_confirmed, day());
-        else E.refreshPeriods(lib, s);
+        E.refreshPeriods(lib, s);
         delete s.ui.settingsDraft;
         await persist();
         announce("Настройки сохранены");

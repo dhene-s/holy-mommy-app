@@ -1,4 +1,4 @@
-const CACHE = "holy-mommy-app-d0abf01d4e8eb9f9";
+const CACHE = "holy-mommy-app-7cb793bb0c3720b2";
 const FILES = ["./","./DejaVuSans.ttf","./FONT-LICENSE.txt","./FONTKIT-LICENSE.txt","./PDF-LICENSE.txt","./app.js","./engine.js","./fontkit.min.js","./icon-192.png","./icon-512.png","./icon.svg","./index.html","./library.json","./manifest.webmanifest","./pdf-lib.min.js","./pdf.js","./policy.js","./rules.js","./store.js","./style.css"];
 self.addEventListener("install", (event) =>
   event.waitUntil(
